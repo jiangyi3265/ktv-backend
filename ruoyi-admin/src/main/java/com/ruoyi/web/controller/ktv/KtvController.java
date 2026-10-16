@@ -1,0 +1,60 @@
+package com.ruoyi.web.controller.ktv;
+
+import com.alibaba.fastjson2.JSONObject;
+import com.ruoyi.common.annotation.Anonymous;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.*;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.server.ResponseStatusException;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+import javax.imageio.ImageIO;
+import java.awt.image.BufferedImage;
+import java.io.*;
+import java.nio.file.*;
+import java.util.UUID;
+
+/** Public routing is intentional: each business endpoint authenticates its opaque KTV session. */
+@Anonymous
+@RestController
+@RequestMapping("/ktv-api")
+public class KtvController {
+    private final KtvService service;
+    @Value("${ktv.upload-path:./data/ktv-uploads}") private String uploadPath;
+    public KtvController(KtvService service) { this.service=service; }
+    @ModelAttribute public void privateResponse(HttpServletResponse response) { response.setHeader("Cache-Control","no-store"); }
+    private JSONObject who(HttpServletRequest request) { return service.identity(request.getHeader("X-KTV-Token")); }
+    @PostMapping("/sessions/customer") public Object customer() { return service.customerSession(); }
+    @PostMapping("/sessions/staff") public Object staff(@RequestBody JSONObject body,HttpServletRequest request) { return service.staffSession(body,request.getRemoteAddr()); }
+    @DeleteMapping("/session") public Object logout(HttpServletRequest request) { service.logout(request.getHeader("X-KTV-Token")); return KtvService.object("ok",true); }
+    @GetMapping("/state") public Object state(HttpServletRequest request) { return service.snapshot(who(request)); }
+    @PostMapping("/orders") public Object order(@RequestBody JSONObject body,HttpServletRequest request) { return service.createOrder(who(request),body); }
+    @PostMapping("/orders/{id}/pay-demo") public Object pay(@PathVariable String id,HttpServletRequest request) { return service.advance(who(request),id,new JSONObject(),true); }
+    @PostMapping("/orders/{id}/transition") public Object advance(@PathVariable String id,@RequestBody JSONObject body,HttpServletRequest request) { return service.advance(who(request),id,body,false); }
+    @PutMapping("/products/{id}") public Object product(@PathVariable String id,@RequestBody JSONObject body,HttpServletRequest request) { return service.product(who(request),id,body); }
+    @PutMapping("/rooms/{id}") public Object room(@PathVariable String id,@RequestBody JSONObject body,HttpServletRequest request) { return service.room(who(request),id,body); }
+    @PostMapping("/accounts") public Object createAccount(@RequestBody JSONObject body,HttpServletRequest request) { return service.account(who(request),null,body); }
+    @PutMapping("/accounts/{id}") public Object account(@PathVariable String id,@RequestBody JSONObject body,HttpServletRequest request) { return service.account(who(request),id,body); }
+    @PostMapping("/images") public Object upload(@RequestParam("file") MultipartFile file,HttpServletRequest request) throws IOException {
+        KtvService.require("admin".equals(who(request).getString("role")),403,"仅管理员可上传图片");
+        KtvService.require(file.getSize()>0 && file.getSize()<=2*1024*1024,400,"图片不能超过 2 MB");
+        BufferedImage image=ImageIO.read(file.getInputStream());
+        KtvService.require(image!=null && image.getWidth()<=4096 && image.getHeight()<=4096,400,"请选择不超过 4096 像素的 PNG 或 JPG 图片");
+        Path directory=Paths.get(uploadPath).toAbsolutePath().normalize(); Files.createDirectories(directory);
+        String name=UUID.randomUUID()+".png"; ImageIO.write(image,"png",directory.resolve(name).toFile());
+        return KtvService.object("url","/ktv-api/assets/"+name);
+    }
+    @GetMapping("/assets/{name}") public ResponseEntity<byte[]> asset(@PathVariable String name) throws IOException {
+        KtvService.require(name.matches("[a-f0-9-]+\\.png"),404,"图片不存在");
+        Path file=Paths.get(uploadPath).toAbsolutePath().normalize().resolve(name);
+        KtvService.require(Files.isRegularFile(file),404,"图片不存在");
+        return ResponseEntity.ok().contentType(MediaType.IMAGE_PNG).header("X-Content-Type-Options","nosniff").cacheControl(CacheControl.maxAge(java.time.Duration.ofDays(30))).body(Files.readAllBytes(file));
+    }
+    @ExceptionHandler(ResponseStatusException.class) public ResponseEntity<Object> error(ResponseStatusException error) {
+        return ResponseEntity.status(error.getStatus()).body(KtvService.object("message",error.getReason()));
+    }
+    @ExceptionHandler(IllegalArgumentException.class) public ResponseEntity<Object> invalid(IllegalArgumentException error) {
+        return ResponseEntity.badRequest().body(KtvService.object("message","请求数据格式无效"));
+    }
+}
