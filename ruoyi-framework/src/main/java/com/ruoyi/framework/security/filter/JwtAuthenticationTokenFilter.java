@@ -27,11 +27,28 @@ public class JwtAuthenticationTokenFilter extends OncePerRequestFilter
     @Autowired
     private TokenService tokenService;
 
+    @Autowired
+    private com.ruoyi.system.service.ISysUserService userService;
+    @Autowired
+    private com.ruoyi.framework.web.service.SysPermissionService permissionService;
+
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
             throws ServletException, IOException
     {
+        try {
         LoginUser loginUser = tokenService.getLoginUser(request);
+        if (loginUser != null) {
+            com.ruoyi.common.core.domain.entity.SysUser current = userService.selectUserById(loginUser.getUserId());
+            if (current == null || !"0".equals(current.getStatus()) || !"0".equals(current.getDelFlag())
+                    || !java.util.Objects.equals(SecurityUtils.credentialVersion(current.getPassword()), loginUser.getCredentialVersion())) {
+                tokenService.delLoginUser(loginUser.getToken());
+                loginUser = null;
+            } else {
+                loginUser.setUser(current);
+                loginUser.setPermissions(permissionService.getMenuPermission(current));
+            }
+        }
         if (StringUtils.isNotNull(loginUser) && StringUtils.isNull(SecurityUtils.getAuthentication()))
         {
             tokenService.verifyToken(loginUser);
@@ -40,5 +57,9 @@ public class JwtAuthenticationTokenFilter extends OncePerRequestFilter
             SecurityContextHolder.getContext().setAuthentication(authenticationToken);
         }
         chain.doFilter(request, response);
+        } catch (org.springframework.dao.DataAccessException error) {
+            response.setStatus(503);response.setContentType("application/json;charset=UTF-8");
+            response.getWriter().write("{\"code\":503,\"msg\":\"身份服务暂不可用，请稍后重试\"}");
+        }
     }
 }

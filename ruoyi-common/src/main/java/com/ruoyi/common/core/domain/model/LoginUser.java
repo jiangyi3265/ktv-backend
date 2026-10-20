@@ -30,6 +30,10 @@ public class LoginUser implements UserDetails
      * 用户唯一标识
      */
     private String token;
+    /** Hash of the credential version at login; SysUser.password is deliberately omitted by Redis JSON serialization. */
+    private String credentialVersion;
+    public String getCredentialVersion() { return credentialVersion; }
+    public void setCredentialVersion(String value) { credentialVersion=value; }
 
     /**
      * 登录时间

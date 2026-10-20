@@ -19,17 +19,19 @@ import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
+import com.ruoyi.common.utils.PasswordPolicy;
 
-/** Shared KTV business state. Every write takes a database row lock, including payment and assignment. */
+/** Small shared catalog plus indexed, individually persisted orders. Writes are transactional. */
 @Service
 public class KtvService {
     private final JdbcTemplate jdbc;
     private final TransactionTemplate tx;
     private final BCryptPasswordEncoder passwords = new BCryptPasswordEncoder();
-    private final Map<String, long[]> failures = new ConcurrentHashMap<>();
     @Value("${ktv.bootstrap-admin-password:}") private String adminPassword;
     @Value("${ktv.bootstrap-supplier-password:}") private String supplierPassword;
     @Value("${ktv.demo-payment-enabled:false}") private boolean demoPayment;
+    @Value("${ktv.production:false}") private boolean production;
+    @Value("${ktv.upload-path:./data/ktv-uploads}") private String uploadPath;
 
     public KtvService(JdbcTemplate jdbc, TransactionTemplate tx) { this.jdbc=jdbc; this.tx=tx; }
     public static JSONObject object(Object... pairs) {
@@ -41,6 +43,7 @@ public class KtvService {
         if(!condition) throw new ResponseStatusException(HttpStatus.valueOf(status),message);
     }
     static String text(JSONObject value,String key,int max) {
+        require(value!=null,400,"请求数据不能为空");
         String s=value.getString(key);
         require(s!=null && !s.trim().isEmpty() && s.length()<=max,400,"无效字段："+key);
         return s.trim();
@@ -59,21 +62,61 @@ public class KtvService {
         return null;
     }
     private JSONObject read() { return JSON.parseObject(jdbc.queryForObject("SELECT payload FROM ktv_shared_state WHERE id=1",String.class)); }
-    private <T> T change(Function<JSONObject,T> action) {
+    private <T> T change(Function<JSONObject,T> action) {return change(null,action);}
+    private <T> T change(String orderId,Function<JSONObject,T> action) {
         return tx.execute(status -> {
             JSONObject state=JSON.parseObject(jdbc.queryForObject("SELECT payload FROM ktv_shared_state WHERE id=1 FOR UPDATE",String.class));
+            JSONArray orders=new JSONArray();
+            if(orderId!=null) for(String payload:jdbc.queryForList("SELECT payload FROM ktv_order WHERE id=? FOR UPDATE",String.class,orderId)) orders.add(JSON.parseObject(payload));
+            state.put("orders",orders);
             T result=action.apply(state);
+            for(Object raw:state.getJSONArray("orders")) saveOrder((JSONObject)raw);
+            state.remove("orders");
             state.put("revision",state.getLongValue("revision")+1);
             jdbc.update("UPDATE ktv_shared_state SET payload=? WHERE id=1",state.toJSONString());
             return result;
         });
     }
+    private void saveOrder(JSONObject o) {
+        jdbc.update("INSERT INTO ktv_order(id,customer_id,supplier_id,room,status,paid,request_key,payload) VALUES(?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE supplier_id=VALUES(supplier_id),room=VALUES(room),status=VALUES(status),paid=VALUES(paid),payload=VALUES(payload)",o.getString("id"),o.getString("customerId"),o.getString("supplierId"),o.getString("room"),o.getString("status"),o.getBooleanValue("paid"),o.getString("requestKey"),o.toJSONString());
+    }
+    private void migrateRoomIndex() {
+        boolean exists=Boolean.TRUE.equals(jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Boolean>) connection -> {
+            try(java.sql.ResultSet columns=connection.getMetaData().getColumns(connection.getCatalog(),null,"ktv_order","room")){return columns.next();}
+        }));
+        if(!exists) jdbc.execute("ALTER TABLE ktv_order ADD COLUMN room VARCHAR(12) NOT NULL DEFAULT ''");
+        // Empty values also resume an interrupted backfill without replacing any business data.
+        while(true) {
+            List<String> pending=jdbc.queryForList("SELECT payload FROM ktv_order WHERE room='' ORDER BY id LIMIT 500",String.class);
+            if(pending.isEmpty()) break;
+            tx.execute(status -> {for(String raw:pending){JSONObject order=JSON.parseObject(raw);jdbc.update("UPDATE ktv_order SET room=? WHERE id=?",text(order,"room",12),order.getString("id"));}return null;});
+        }
+    }
+    private void migrateOrders() {
+        tx.execute(status -> {
+            JSONObject old=JSON.parseObject(jdbc.queryForObject("SELECT payload FROM ktv_shared_state WHERE id=1 FOR UPDATE",String.class));
+            if(old.containsKey("orders")) {
+                for(Object raw:old.getJSONArray("orders")) saveOrder((JSONObject)raw);
+                old.remove("orders");old.put("schemaVersion",2);
+                jdbc.update("UPDATE ktv_shared_state SET payload=? WHERE id=1",old.toJSONString());
+            }
+            return null;
+        });
+    }
     @PostConstruct
     public void initialize() {
+        require(!production || !demoPayment,503,"生产环境禁止开启演示支付");
         jdbc.execute("CREATE TABLE IF NOT EXISTS ktv_shared_state (id INT PRIMARY KEY,payload LONGTEXT NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
         jdbc.execute("CREATE TABLE IF NOT EXISTS ktv_session (token_hash VARCHAR(64) PRIMARY KEY,role VARCHAR(16) NOT NULL,subject VARCHAR(80) NOT NULL,expires_at DATETIME NOT NULL,INDEX(expires_at)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-        if(jdbc.queryForObject("SELECT COUNT(*) FROM ktv_shared_state",Integer.class)>0) return;
-        require(adminPassword.length()>=12 && supplierPassword.length()>=12,503,"首次启动请配置 KTV 管理员及食堂初始密码（至少 12 位）");
+        jdbc.execute("CREATE TABLE IF NOT EXISTS ktv_identity (recovery_hash VARCHAR(64) PRIMARY KEY,subject VARCHAR(80) NOT NULL,created_at DATETIME NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+        jdbc.execute("CREATE TABLE IF NOT EXISTS ktv_audit (id BIGINT AUTO_INCREMENT PRIMARY KEY,actor VARCHAR(100) NOT NULL,action VARCHAR(60) NOT NULL,target VARCHAR(80),detail TEXT,created_at DATETIME NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+        jdbc.execute("CREATE TABLE IF NOT EXISTS ktv_qr (scene VARCHAR(32) PRIMARY KEY,room VARCHAR(12) NOT NULL UNIQUE) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+        jdbc.execute("CREATE TABLE IF NOT EXISTS ktv_rate (bucket VARCHAR(64) PRIMARY KEY,hits INT NOT NULL,expires_at DATETIME NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+        jdbc.execute("CREATE TABLE IF NOT EXISTS ktv_payment (order_id VARCHAR(80) PRIMARY KEY,trade_no VARCHAR(32) UNIQUE NOT NULL,transaction_id VARCHAR(64) UNIQUE,refund_no VARCHAR(64) UNIQUE,refund_status VARCHAR(32),created_at DATETIME NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+        jdbc.execute("CREATE TABLE IF NOT EXISTS ktv_order (id BIGINT PRIMARY KEY,customer_id VARCHAR(80) NOT NULL,supplier_id VARCHAR(40) NOT NULL,room VARCHAR(12) NOT NULL DEFAULT '',status VARCHAR(20) NOT NULL,paid BOOLEAN NOT NULL,request_key VARCHAR(80),payload LONGTEXT NOT NULL,UNIQUE(customer_id,request_key),INDEX(customer_id,id),INDEX(supplier_id,status,id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+        migrateRoomIndex();
+        if(jdbc.queryForObject("SELECT COUNT(*) FROM ktv_shared_state",Integer.class)>0) {migrateOrders();return;}
+        require(PasswordPolicy.valid(adminPassword) && PasswordPolicy.valid(supplierPassword),503,"首次启动请配置有效的 KTV 管理员及食堂初始密码");
         JSONArray products=new JSONArray();
         String[][] rows={{"chicken","宫保鸡丁饭","主食","32","经典川味，香辣过瘾"},{"beef","黑椒牛柳饭","主食","38","黑椒浓郁，牛肉鲜嫩"},{"bites","香酥鸡米花","小吃","22","外酥里嫩，香气四溢"},{"noodle","番茄牛腩面","主食","36","浓郁番茄，软烂牛腩"}};
         for(String[] row:rows) products.add(object("id",row[0],"name",row[1],"category",row[2],"price",Integer.valueOf(row[3]),"image",row[0],"description",row[4],"onSale",true,"version",1));
@@ -84,23 +127,46 @@ public class KtvService {
         accounts.add(object("id","A02","name","备用账号","enabled",false,"process",true,"deliver",true,"passwordHash",passwords.encode(token()),"version",1));
         JSONObject state=object("revision",1,"nextOrder",1000,"products",products,"rooms",rooms,"accounts",accounts,"orders",new JSONArray(),"adminHash",passwords.encode(adminPassword));
         jdbc.update("INSERT IGNORE INTO ktv_shared_state(id,payload) VALUES(1,?)",state.toJSONString());
+        migrateOrders();
     }
-    public JSONObject customerSession() { return session("customer","customer-"+UUID.randomUUID()); }
-    public synchronized JSONObject staffSession(JSONObject body,String remote) {
-        String username=text(body,"username",64),password=text(body,"password",100);
-        String key=remote+":"+username;
-        long now=System.currentTimeMillis();
-        long[] attempts=failures.get(key);
-        require(attempts==null || attempts[0]<5 || now-attempts[1]>600000,429,"登录失败次数过多，请十分钟后重试");
+    public JSONObject customerSession(JSONObject body) {
+        String recovery=body==null?null:body.getString("recovery");
+        if(recovery!=null) {
+            require(recovery.matches("[A-Za-z0-9_-]{43}"),401,"顾客身份凭据无效");
+            List<String> ids=jdbc.queryForList("SELECT subject FROM ktv_identity WHERE recovery_hash=?",String.class,hash(recovery));
+            require(!ids.isEmpty(),401,"顾客身份凭据已失效，请联系管理员恢复订单");
+            return session("customer",ids.get(0));
+        }
+        recovery=token(); String subject="customer-"+UUID.randomUUID();
+        jdbc.update("INSERT INTO ktv_identity(recovery_hash,subject,created_at) VALUES(?,?,NOW())",hash(recovery),subject);
+        JSONObject result=session("customer",subject); result.put("recovery",recovery);return result;
+    }
+    public JSONObject wechatSession(String openid) { return session("customer","wx-"+openid); }
+    public JSONObject customerRecovery(JSONObject who) {
+        role(who,"customer");String recovery=token();
+        jdbc.update("INSERT INTO ktv_identity(recovery_hash,subject,created_at) VALUES(?,?,NOW())",hash(recovery),who.getString("subject"));return object("recovery",recovery);
+    }
+    public JSONObject staffSession(JSONObject body,String remote) {
+        String username=text(body,"username",64),password=body.getString("password");
+        require(password!=null && password.getBytes(StandardCharsets.UTF_8).length<=72,400,"密码不能超过 72 个 UTF-8 字节");
+        limit("login:"+remote+":"+username,10,600);
         JSONObject state=read(), account=find(state.getJSONArray("accounts"),username);
         String encoded=username.equals("ktv-admin")?state.getString("adminHash"):account==null?"":account.getString("passwordHash");
         if(encoded==null || !passwords.matches(password,encoded) || (account!=null && !account.getBooleanValue("enabled"))) {
-            if(attempts==null || now-attempts[1]>600000) attempts=new long[]{0,now};
-            attempts[0]++; failures.put(key,attempts);
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED,"账号、密码错误或账号已停用");
         }
-        failures.remove(key);
         return session(username.equals("ktv-admin")?"admin":"supplier",username);
+    }
+    public void limit(String key,int maximum,int seconds) {
+        // Shared DB quota works across API instances; rejected attempts cannot grow the bucket table.
+        int count=tx.execute(status -> {
+            jdbc.update("DELETE FROM ktv_rate WHERE expires_at<NOW()");
+            String bucket=hash(key);
+            jdbc.update("INSERT IGNORE INTO ktv_rate(bucket,hits,expires_at) VALUES(?,0,?)",bucket,LocalDateTime.now().plusSeconds(seconds));
+            jdbc.update("UPDATE ktv_rate SET hits=hits+1 WHERE bucket=?",bucket);
+            return jdbc.queryForObject("SELECT hits FROM ktv_rate WHERE bucket=?",Integer.class,bucket);
+        });
+        require(count<=maximum,429,"操作过于频繁，请稍后重试");
     }
     private JSONObject session(String role,String subject) {
         String token=token();
@@ -121,17 +187,40 @@ public class KtvService {
         require(account!=null && account.getBooleanValue("enabled"),403,"食堂账号已停用，请联系管理员");
         return account;
     }
-    public JSONObject snapshot(JSONObject who) {
+    public JSONObject snapshot(JSONObject who) {return snapshot(who,1,null);}
+    public JSONObject snapshot(JSONObject who,int page,String selectedId) {return snapshot(who,page,selectedId,"","","","");}
+    public JSONObject snapshot(JSONObject who,int page,String selectedId,String filter,String search,String room,String payment) {
+        require(page>=1 && page<=10000,400,"页码无效");
+        require(Arrays.asList("","all","active","unpaid","pending","preparing","delivering","completed","cancelled","refunding","refunded").contains(filter),400,"订单状态筛选无效");
+        require(search.length()<=80 && room.length()<=12 && Arrays.asList("","paid","unpaid").contains(payment),400,"订单筛选条件无效");
         JSONObject state=read(); String role=who.getString("role");
         JSONArray orders=new JSONArray(),products=new JSONArray(),rooms=new JSONArray(),accounts=new JSONArray();
         if(role.equals("supplier")) { JSONObject account=copy(supplier(state,who)); account.remove("passwordHash"); accounts.add(account); }
         else {
             for(Object raw:state.getJSONArray("products")) { JSONObject p=(JSONObject)raw; if(role.equals("admin") || p.getBooleanValue("onSale")) products.add(p); }
-            for(Object raw:state.getJSONArray("rooms")) { JSONObject room=(JSONObject)raw; if(role.equals("admin") || room.getBooleanValue("bound")) rooms.add(room); }
+            for(Object raw:state.getJSONArray("rooms")) { JSONObject item=(JSONObject)raw; if(role.equals("admin") || item.getBooleanValue("bound")) rooms.add(item); }
         }
         if(role.equals("admin")) for(Object raw:state.getJSONArray("accounts")) { JSONObject a=copy((JSONObject)raw); a.remove("passwordHash"); accounts.add(a); }
-        for(Object raw:state.getJSONArray("orders")) {
+        String scope=" WHERE 1=1";List<Object> params=new ArrayList<>();
+        if(role.equals("customer")){scope+=" AND customer_id=?";params.add(who.getString("subject"));}
+        else if(role.equals("supplier")){scope+=" AND supplier_id=? AND paid=TRUE";params.add(who.getString("subject"));}
+        JSONObject counts=new JSONObject();
+        for(Map<String,Object> row:jdbc.queryForList("SELECT status,COUNT(*) AS total FROM ktv_order"+scope+" GROUP BY status",params.toArray())) counts.put((String)row.get("status"),row.get("total"));
+        JSONArray alerts=new JSONArray();
+        if(role.equals("supplier")) for(Map<String,Object> row:jdbc.queryForList("SELECT id,room FROM ktv_order"+scope+" AND status='pending' ORDER BY id DESC LIMIT 20",params.toArray())) alerts.add(object("id",String.valueOf(row.get("id")),"room",row.get("room"),"status","pending"));
+        String where=scope;
+        if(filter.equals("active"))where+=" AND status IN ('pending','preparing','delivering')";
+        else if(!filter.isEmpty() && !filter.equals("all")){where+=" AND status=?";params.add(filter);}
+        if(!search.trim().isEmpty()){where+=" AND (LOCATE(?,CONCAT('',id))>0 OR LOCATE(?,LOWER(room))>0)";params.add(search.trim().toLowerCase(Locale.ROOT));params.add(search.trim().toLowerCase(Locale.ROOT));}
+        if(!room.isEmpty()){where+=" AND room=?";params.add(room);}
+        if(!payment.isEmpty()){where+=" AND paid=?";params.add(payment.equals("paid"));}
+        params.add((page-1)*100);
+        List<String> stored=jdbc.queryForList("SELECT payload FROM ktv_order"+where+" ORDER BY id DESC LIMIT 101 OFFSET ?",String.class,params.toArray());
+        boolean hasMore=stored.size()>100;if(hasMore) stored=stored.subList(0,100);
+        for(String payload:stored) {
+            Object raw=JSON.parseObject(payload);
             JSONObject order=(JSONObject)raw;
+            formatOrderTime(order);
             if(role.equals("admin") || (role.equals("customer") && who.getString("subject").equals(order.getString("customerId")))) {
                 JSONObject safe=copy(order); safe.remove("requestKey"); safe.remove("requestHash"); orders.add(safe);
             } else if(role.equals("supplier") && order.getBooleanValue("paid") && who.getString("subject").equals(order.getString("supplierId"))) {
@@ -140,20 +229,29 @@ public class KtvService {
                 orders.add(object("id",order.get("id"),"room",order.get("room"),"status",order.get("status"),"time",order.get("time"),"items",items,"events",order.get("events"),"version",order.get("version")));
             }
         }
-        return object("revision",state.get("revision"),"role",role,"subject",who.get("subject"),"products",products,"rooms",rooms,"accounts",accounts,"orders",orders,"demoPayment",demoPayment);
+        JSONObject detail=null;
+        if(selectedId!=null && !selectedId.isEmpty()) {try{detail=order(who,selectedId);}catch(ResponseStatusException e){if(e.getRawStatusCode()!=404)throw e;}}
+        return object("revision",state.get("revision"),"role",role,"subject",who.get("subject"),"products",products,"rooms",rooms,"accounts",accounts,"orders",orders,"orderDetail",detail,"orderCounts",counts,"orderAlerts",alerts,"page",page,"hasMore",hasMore,"demoPayment",demoPayment);
+    }
+    private void formatOrderTime(JSONObject order) {
+        String created=order.getString("createdAt");
+        if(created!=null && created.length()>=16) order.put("time",created.substring(0,10)+" "+created.substring(11,16));
     }
     public JSONObject createOrder(JSONObject who,JSONObject body) {
         role(who,"customer");
         String room=text(body,"room",12),key=text(body,"requestKey",80);
+        require(room.equals(resolveRoom(body.getString("scene")).getString("room")),409,"包厢信息已变化，请重新扫码");
         JSONArray requested=body.getJSONArray("items");
         require(requested!=null && requested.size()>0 && requested.size()<=50,400,"请选择餐品");
         String fingerprint=hash(room+requested.toJSONString());
         return change(state -> {
-            for(Object raw:state.getJSONArray("orders")) { JSONObject existing=(JSONObject)raw;
+            for(String payload:jdbc.queryForList("SELECT payload FROM ktv_order WHERE customer_id=? AND request_key=?",String.class,who.getString("subject"),key)) { JSONObject existing=JSON.parseObject(payload);
                 if(who.getString("subject").equals(existing.getString("customerId")) && key.equals(existing.getString("requestKey"))) {
                     require(fingerprint.equals(existing.getString("requestHash")),409,"请求编号已用于另一张订单"); return object("id",existing.getString("id"));
                 }
             }
+            long open=jdbc.queryForObject("SELECT COUNT(*) FROM ktv_order WHERE customer_id=? AND status='unpaid'",Long.class,who.getString("subject"));
+            require(open<5,429,"待付款订单过多，请先支付或取消已有订单");
             JSONObject selectedRoom=find(state.getJSONArray("rooms"),room);
             require(selectedRoom!=null && selectedRoom.getBooleanValue("bound"),409,"当前包厢未启用，请重新扫码");
             JSONObject assigned=null;
@@ -171,7 +269,7 @@ public class KtvService {
             int number=state.getIntValue("nextOrder"); state.put("nextOrder",number+1);
             String id=String.valueOf(number);
             JSONObject order=object("id",id,"room",room,"customerId",who.get("subject"),"supplierId",assigned.get("id"),"status","unpaid","paid",false,"items",items,"totalCents",cents,"time","今天 "+LocalDateTime.now().format(DateTimeFormatter.ofPattern("HH:mm")),"createdAt",LocalDateTime.now().toString(),"requestKey",key,"requestHash",fingerprint,"version",1,"events",new JSONArray());
-            event(order,"订单已创建，等待支付"); state.getJSONArray("orders").add(0,order);
+            event(order,"订单已创建，等待支付"); state.getJSONArray("orders").add(0,order);audit(who,"order.create",id,object("totalCents",cents,"room",room));
             return object("id",id);
         });
     }
@@ -182,7 +280,7 @@ public class KtvService {
     public JSONObject advance(JSONObject who,String id,JSONObject body,boolean payment) {
         if(payment) { role(who,"customer"); require(demoPayment,403,"模拟支付已关闭，请接入微信支付"); }
         else role(who,"supplier");
-        return change(state -> {
+        return change(id,state -> {
             JSONObject order=find(state.getJSONArray("orders"),id); require(order!=null,404,"订单不存在");
             String next=payment?"pending":text(body,"status",20),current=order.getString("status");
             if(payment) require(who.getString("subject").equals(order.getString("customerId")),403,"无权支付该订单");
@@ -210,8 +308,129 @@ public class KtvService {
             }
             order.put("status",next); order.put("paid",true); order.put("version",order.getIntValue("version")+1);
             String label=next.equals("pending")?"模拟支付成功":next.equals("preparing")?"食堂接单":next.equals("delivering")?"开始配送":"配送方确认送达";
-            event(order,label); if(payment) order.put("paymentMode","demo");
+            event(order,label); if(payment) { order.put("paymentMode","demo");order.put("paidAt",LocalDateTime.now().toString()); }
+            audit(who,"order.transition",id,object("from",current,"to",next));
             return object("id",id);
+        });
+    }
+    void audit(JSONObject who,String action,String target,JSONObject detail) {
+        org.springframework.web.context.request.RequestAttributes attributes=org.springframework.web.context.request.RequestContextHolder.getRequestAttributes();
+        Object requestId=attributes==null?null:attributes.getAttribute("ktvRequestId",org.springframework.web.context.request.RequestAttributes.SCOPE_REQUEST);
+        detail=object("requestId",requestId==null?UUID.randomUUID().toString():requestId,"data",detail);
+        jdbc.update("INSERT INTO ktv_audit(actor,action,target,detail,created_at) VALUES(?,?,?,?,NOW())",who.getString("role")+":"+who.getString("subject"),action,target,detail.toJSONString());
+    }
+    public Object audits(JSONObject who,int page) {
+        role(who,"admin"); require(page>=1 && page<=100000,400,"页码无效");
+        return jdbc.queryForList("SELECT id,actor,action,target,detail,created_at FROM ktv_audit ORDER BY id DESC LIMIT 50 OFFSET ?",(page-1)*50);
+    }
+    public JSONObject order(JSONObject who,String id) {
+        require(id!=null && id.matches("[0-9]{1,18}"),404,"订单不存在");
+        List<String> rows=jdbc.queryForList("SELECT payload FROM ktv_order WHERE id=?",String.class,id);require(!rows.isEmpty(),404,"订单不存在");
+        JSONObject found=JSON.parseObject(rows.get(0));String role=who.getString("role");
+        require("admin".equals(role) || ("customer".equals(role) && who.getString("subject").equals(found.getString("customerId"))) || ("supplier".equals(role) && found.getBooleanValue("paid") && who.getString("subject").equals(found.getString("supplierId"))),404,"订单不存在");
+        found.remove("requestKey");found.remove("requestHash");formatOrderTime(found);
+        if("supplier".equals(role)) {
+            supplier(read(),who);JSONArray items=new JSONArray();for(Object raw:found.getJSONArray("items")) {JSONObject item=(JSONObject)raw;items.add(object("id",item.get("id"),"name",item.get("name"),"quantity",item.get("quantity"),"image",item.get("image"),"customImage",item.get("customImage")));}
+            return object("id",found.get("id"),"room",found.get("room"),"status",found.get("status"),"time",found.get("time"),"items",items,"events",found.get("events"),"version",found.get("version"));
+        }
+        return found;
+    }
+    public JSONObject cancel(JSONObject who,String id) {
+        return change(id,state -> {
+            JSONObject o=find(state.getJSONArray("orders"),id); require(o!=null,404,"订单不存在");
+            require("admin".equals(who.getString("role")) || ("customer".equals(who.getString("role")) && who.getString("subject").equals(o.getString("customerId"))),403,"无权取消订单");
+            if("cancelled".equals(o.getString("status"))) return object("id",id);
+            require("unpaid".equals(o.getString("status")),409,"订单已支付，请联系管理员处理退款");
+            o.put("status","cancelled");o.put("version",o.getIntValue("version")+1);event(o,"订单已取消");audit(who,"order.cancel",id,new JSONObject());return object("id",id);
+        });
+    }
+    public JSONObject reassign(JSONObject who,String id,JSONObject body) {
+        role(who,"admin");String supplierId=text(body,"supplierId",40),reason=text(body,"reason",200);
+        return change(id,state -> {
+            JSONObject o=find(state.getJSONArray("orders"),id);version(o,body);
+            require(Arrays.asList("pending","preparing","delivering").contains(o.getString("status")),409,"当前订单不能转派");
+            JSONObject a=find(state.getJSONArray("accounts"),supplierId);
+            require(a!=null && a.getBooleanValue("enabled") && a.getBooleanValue("process") && a.getBooleanValue("deliver"),409,"目标食堂无完整接单权限");
+            String previous=o.getString("supplierId");require(!supplierId.equals(previous),409,"订单已属于该食堂");
+            o.put("supplierId",supplierId);o.put("version",o.getIntValue("version")+1);
+            event(o,"管理员转派订单");audit(who,"order.reassign",id,object("from",previous,"to",supplierId,"reason",reason));return object("id",id);
+        });
+    }
+    public JSONObject rotatePassword(JSONObject who,JSONObject body) {
+        role(who,"admin");String old=body.getString("oldPassword"),next=body.getString("password");
+        require(PasswordPolicy.valid(next) && old!=null && old.getBytes(StandardCharsets.UTF_8).length<=72,400,"新密码至少12个字符，UTF-8编码不得超过72字节");
+        return change(state -> {
+            require("ktv-admin".equals(who.getString("subject")) && passwords.matches(old,state.getString("adminHash")),403,"原密码错误");
+            state.put("adminHash",passwords.encode(next));jdbc.update("DELETE FROM ktv_session WHERE role='admin'");audit(who,"admin.password.rotate","ktv-admin",new JSONObject());return object("ok",true);
+        });
+    }
+    public JSONObject roomCode(JSONObject who,String id,boolean rotate) {
+        role(who,"admin");
+        return change(state -> {
+            JSONObject room=find(state.getJSONArray("rooms"),id);require(room!=null && room.getBooleanValue("bound"),409,"请先启用包厢");
+            if(rotate) jdbc.update("DELETE FROM ktv_qr WHERE room=?",id);
+            String scene=UUID.randomUUID().toString().replace("-","");
+            jdbc.update("INSERT IGNORE INTO ktv_qr(scene,room) VALUES(?,?)",scene,id);
+            scene=jdbc.queryForObject("SELECT scene FROM ktv_qr WHERE room=?",String.class,id);
+            if(rotate) audit(who,"room.qr.rotate",id,new JSONObject());
+            return object("scene",scene,"room",id);
+        });
+    }
+    public JSONObject resolveRoom(String scene) {
+        require(scene!=null && scene.matches("[a-f0-9]{32}"),400,"包厢码无效，请重新扫码");
+        List<String> rooms=jdbc.queryForList("SELECT room FROM ktv_qr WHERE scene=?",String.class,scene);
+        require(!rooms.isEmpty(),404,"包厢码已失效，请重新扫码");
+        JSONObject room=find(read().getJSONArray("rooms"),rooms.get(0));require(room!=null && room.getBooleanValue("bound"),409,"当前包厢已停用");return object("room",room.getString("id"),"scene",scene);
+    }
+    public String paymentTrade(String id) {
+        List<String> list=jdbc.queryForList("SELECT trade_no FROM ktv_payment WHERE order_id=?",String.class,id);return list.isEmpty()?null:list.get(0);
+    }
+    public JSONObject paymentIntent(JSONObject who,String id) {
+        role(who,"customer");require(who.getString("subject").startsWith("wx-"),409,"请在微信小程序中登录后支付");
+        return change(id,state -> {
+            JSONObject o=find(state.getJSONArray("orders"),id);require(o!=null && who.getString("subject").equals(o.getString("customerId")),404,"订单不存在");
+            require("unpaid".equals(o.getString("status")),409,"订单状态已变化，请刷新");
+            jdbc.update("INSERT IGNORE INTO ktv_payment(order_id,trade_no,created_at) VALUES(?,?,NOW())",id,UUID.randomUUID().toString().replace("-",""));
+            return object("tradeNo",paymentTrade(id),"total",o.getIntValue("totalCents"),"openid",who.getString("subject").substring(3));
+        });
+    }
+    public void confirmPayment(String trade,String transaction,int total,String paidAt,String openid) {
+        String target=jdbc.queryForObject("SELECT order_id FROM ktv_payment WHERE trade_no=?",String.class,trade);
+        change(target,state -> {
+            List<String> ids=jdbc.queryForList("SELECT order_id FROM ktv_payment WHERE trade_no=?",String.class,trade); require(!ids.isEmpty(),404,"支付订单不存在");
+            String id=ids.get(0);JSONObject o=find(state.getJSONArray("orders"),id);
+            require(o!=null && o.getLongValue("totalCents")==total && ("wx-"+openid).equals(o.getString("customerId")),409,"支付金额或付款人不匹配");
+            if(o.getBooleanValue("paid")) {require(transaction.equals(o.getString("transactionId")),409,"交易号不一致");return null;}
+            require("unpaid".equals(o.getString("status")),409,"订单状态异常，请人工核对支付");
+            jdbc.update("UPDATE ktv_payment SET transaction_id=? WHERE order_id=?",transaction,id);
+            o.put("status","pending");o.put("paid",true);o.put("paymentMode","wechat");o.put("transactionId",transaction);o.put("paidAt",paidAt);o.put("version",o.getIntValue("version")+1);
+            event(o,"微信支付成功");audit(object("role","system","subject","wechat"),"payment.success",id,object("transactionId",transaction,"totalCents",total));return null;
+        });
+    }
+    public JSONObject refundIntent(JSONObject who,String id,JSONObject body) {
+        role(who,"admin");String reason=text(body,"reason",200);
+        return change(id,state -> {
+            JSONObject o=find(state.getJSONArray("orders"),id);require(o!=null && o.getBooleanValue("paid") && "wechat".equals(o.getString("paymentMode")),409,"仅真实已付款订单可申请微信退款");
+            require(!"refunded".equals(o.getString("status")),409,"订单已退款");
+            String refund=jdbc.queryForObject("SELECT refund_no FROM ktv_payment WHERE order_id=?",String.class,id);
+            if(refund==null) {
+                version(o,body);refund=UUID.randomUUID().toString().replace("-","");
+                jdbc.update("UPDATE ktv_payment SET refund_no=?,refund_status='REQUESTED' WHERE order_id=?",refund,id);
+                o.put("status","refunding");o.put("version",o.getIntValue("version")+1);event(o,"管理员申请全额退款");audit(who,"refund.request",id,object("reason",reason,"refundNo",refund));
+            }
+            return object("tradeNo",paymentTrade(id),"refundNo",refund,"total",o.getLongValue("totalCents"),"reason",reason);
+        });
+    }
+    public void confirmRefund(String refund,String providerStatus,long total,long refunded) {
+        String target=jdbc.queryForObject("SELECT order_id FROM ktv_payment WHERE refund_no=?",String.class,refund);
+        change(target,state -> {
+            List<String> ids=jdbc.queryForList("SELECT order_id FROM ktv_payment WHERE refund_no=?",String.class,refund);require(!ids.isEmpty(),404,"退款记录不存在");
+            JSONObject o=find(state.getJSONArray("orders"),ids.get(0));require(o!=null && o.getLongValue("totalCents")==total && refunded==total,409,"退款金额不匹配");
+            if("refunded".equals(o.getString("status"))) return null;
+            jdbc.update("UPDATE ktv_payment SET refund_status=? WHERE refund_no=?",providerStatus,refund);
+            o.put("refundStatus",providerStatus);
+            if("SUCCESS".equals(providerStatus)) {o.put("status","refunded");o.put("refundedAt",LocalDateTime.now().toString());o.put("version",o.getIntValue("version")+1);event(o,"微信全额退款成功");audit(object("role","system","subject","wechat"),"refund.success",o.getString("id"),object("refundNo",refund));}
+            return null;
         });
     }
     private void version(JSONObject existing,JSONObject body) {
@@ -222,13 +441,18 @@ public class KtvService {
         role(who,"admin");
         return change(state -> {
             JSONObject existing=find(state.getJSONArray("products"),id);
+            JSONObject before=existing==null?null:copy(existing);
             if(existing!=null) version(existing,body); else require(id.matches("food-[a-zA-Z0-9-]{1,50}"),400,"餐品编号无效");
             String name=text(body,"name",60),category=text(body,"category",10); double price=body.getDoubleValue("price");
             require(Arrays.asList("主食","小吃").contains(category) && Double.isFinite(price) && price>0 && price<=9999 && Math.abs(price*100-Math.rint(price*100))<0.00001,400,"餐品价格或分类无效");
             String custom=body.getString("customImage");
+            require(body.getString("description")==null || body.getString("description").length()<=300,400,"餐品描述不能超过300字");
+            require(body.getString("image")==null || Arrays.asList("chicken","beef","bites","noodle").contains(body.getString("image")),400,"餐品图片编号无效");
             require(custom==null || custom.isEmpty() || custom.matches("/ktv-api/assets/[a-f0-9-]+\\.(png|jpg)"),400,"请先上传餐品图片");
+            if(custom!=null && !custom.isEmpty()) require(java.nio.file.Files.isRegularFile(java.nio.file.Paths.get(uploadPath).toAbsolutePath().normalize().resolve(custom.substring(custom.lastIndexOf('/')+1))),400,"餐品图片不存在，请重新上传");
             JSONObject p=object("id",id,"name",name,"category",category,"price",price,"image",body.getString("image"),"customImage",custom,"description",body.getString("description"),"onSale",body.getBooleanValue("onSale"),"version",existing==null?1:existing.getIntValue("version")+1);
             if(existing==null) state.getJSONArray("products").add(p); else { existing.clear();existing.putAll(p); }
+            audit(who,"product.save",id,object("before",before,"after",p));
             return object("id",id);
         });
     }
@@ -236,11 +460,14 @@ public class KtvService {
         role(who,"admin");
         return change(state -> {
             JSONObject existing=find(state.getJSONArray("rooms"),id); String name=text(body,"id",12);
+            JSONObject before=existing==null?null:copy(existing);
             require(name.matches("[A-Z0-9\u4e00-\u9fa5-]{1,12}"),400,"包厢编号无效");
             if(existing!=null) version(existing,body);
             require(id.equals(name) || find(state.getJSONArray("rooms"),name)==null,409,"包厢编号已存在");
             JSONObject room=object("id",name,"bound",body.getBooleanValue("bound"),"version",existing==null?1:existing.getIntValue("version")+1);
             if(existing==null) state.getJSONArray("rooms").add(room); else {existing.clear();existing.putAll(room);}
+            if(!id.equals(name)) jdbc.update("DELETE FROM ktv_qr WHERE room=?",id);
+            audit(who,"room.save",name,object("before",before,"after",room));
             return object("id",name);
         });
     }
@@ -252,11 +479,14 @@ public class KtvService {
             String name=text(body,"name",60);
             for(Object raw:state.getJSONArray("accounts")) { JSONObject a=(JSONObject)raw; require(a==existing || !name.equals(a.getString("name")),409,"账号名称已存在"); }
             String password=body.getString("password");
-            if(existing==null || (password!=null&&!password.isEmpty())) require(password!=null && password.length()>=12 && password.length()<=72,400,"登录密码需为 12–72 位");
+            if(existing==null || (password!=null&&!password.isEmpty())) require(PasswordPolicy.valid(password),400,"密码至少12个字符，UTF-8编码不得超过72字节");
+            if(existing!=null && (!body.getBooleanValue("enabled") || !body.getBooleanValue("process") || !body.getBooleanValue("deliver")))
+                require(jdbc.queryForObject("SELECT COUNT(*) FROM ktv_order WHERE supplier_id=? AND status IN ('pending','preparing','delivering')",Integer.class,id)==0,409,"该食堂仍有进行中订单，请先完成或转派后再停用权限");
             String accountId=id==null?"A"+String.format("%02d",state.getJSONArray("accounts").size()+1):id;
             JSONObject a=object("id",accountId,"name",name,"enabled",body.getBooleanValue("enabled"),"process",body.getBooleanValue("process"),"deliver",body.getBooleanValue("deliver"),"version",existing==null?1:existing.getIntValue("version")+1,"passwordHash",password!=null&&!password.isEmpty()?passwords.encode(password):existing.getString("passwordHash"));
             if(existing==null) state.getJSONArray("accounts").add(a); else {existing.clear();existing.putAll(a);}
             if(password!=null && !password.isEmpty()) jdbc.update("DELETE FROM ktv_session WHERE role='supplier' AND subject=?",accountId);
+            audit(who,"account.save",accountId,object("enabled",a.get("enabled"),"process",a.get("process"),"deliver",a.get("deliver"),"passwordChanged",password!=null&&!password.isEmpty()));
             return object("id",accountId);
         });
     }

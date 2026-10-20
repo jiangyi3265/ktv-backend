@@ -20,6 +20,11 @@ import com.ruoyi.common.exception.ServiceException;
  */
 public class SecurityUtils
 {
+    public static String credentialVersion(String password) {
+        if (password == null) return null;
+        try { return java.util.Base64.getEncoder().encodeToString(java.security.MessageDigest.getInstance("SHA-256").digest(password.getBytes(java.nio.charset.StandardCharsets.UTF_8))); }
+        catch (java.security.NoSuchAlgorithmException e) { throw new IllegalStateException(e); }
+    }
 
     /**
      * 用户ID
@@ -97,6 +102,7 @@ public class SecurityUtils
      */
     public static String encryptPassword(String password)
     {
+        PasswordPolicy.require(password);
         BCryptPasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
         return passwordEncoder.encode(password);
     }
@@ -110,6 +116,7 @@ public class SecurityUtils
      */
     public static boolean matchesPassword(String rawPassword, String encodedPassword)
     {
+        if (rawPassword == null || rawPassword.getBytes(java.nio.charset.StandardCharsets.UTF_8).length > 72) return false;
         BCryptPasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
         return passwordEncoder.matches(rawPassword, encodedPassword);
     }

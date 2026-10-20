@@ -23,6 +23,8 @@ import com.ruoyi.framework.interceptor.RepeatSubmitInterceptor;
 @Configuration
 public class ResourcesConfig implements WebMvcConfigurer
 {
+    @org.springframework.beans.factory.annotation.Value("${ktv.allowed-origins:http://127.0.0.1,http://localhost,http://127.0.0.1:5174,http://localhost:5174,http://127.0.0.1:5186,http://localhost:5186}")
+    private String allowedOrigins;
     @Autowired
     private RepeatSubmitInterceptor repeatSubmitInterceptor;
 
@@ -56,7 +58,7 @@ public class ResourcesConfig implements WebMvcConfigurer
     {
         CorsConfiguration config = new CorsConfiguration();
         // 设置访问源地址
-        config.addAllowedOriginPattern("*");
+        for (String origin : allowedOrigins.split(",")) if (!origin.trim().isEmpty()) config.addAllowedOrigin(origin.trim());
         // 设置访问源请求头
         config.addAllowedHeader("*");
         // 设置访问源请求方法

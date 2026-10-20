@@ -74,6 +74,7 @@ public class TokenService
                 LoginUser user = redisCache.getCacheObject(userKey);
                 return user;
             }
+            catch (org.springframework.dao.DataAccessException e) { throw e; }
             catch (Exception e)
             {
                 log.error("获取用户信息异常'{}'", e.getMessage());
@@ -113,6 +114,7 @@ public class TokenService
      */
     public String createToken(LoginUser loginUser)
     {
+        loginUser.setCredentialVersion(com.ruoyi.common.utils.SecurityUtils.credentialVersion(loginUser.getUser().getPassword()));
         String token = IdUtils.fastUUID();
         loginUser.setToken(token);
         setUserAgent(loginUser);

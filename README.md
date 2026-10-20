@@ -1,6 +1,6 @@
 # ktv-backend
 
-KTV 包厢点餐系统的 Java 后端，为 ktv-app 提供共享点餐业务，为 ktv-admin 提供若依认证与管理基础 API。
+KTV 包厢点餐系统的 Java 后端，为 ktv-app 提供共享点餐业务，为 ktv-admin 提供统一运营管理和若依认证 API。
 
 ## 项目简介
 
@@ -8,7 +8,7 @@ KTV 包厢点餐系统的 Java 后端，为 ktv-app 提供共享点餐业务，�
 
 订单金额由服务端按餐品价格计算，订单保存成交快照；创建请求使用幂等键，管理数据更新检查版本，数据库事务与行锁保护共享状态。食堂仅接收分配给自己的订单，接口隐藏顾客与金额字段。KTV 会话使用不透明令牌，数据库只存令牌摘要，密码使用 BCrypt。
 
-当前实现面向单个门店。真实微信登录、微信支付、退款、小程序码与后台推送尚未接入。模拟支付默认关闭，仅在本地联调时显式开启。
+当前实现面向单个门店。已实现微信 code2Session、JSAPI 支付、验签通知与查单、管理员全额退款、H5 二维码及小程序码生成；正式账号和 HTTPS 域名配置后仍须真机验收。模拟支付默认关闭，生产模式禁止开启。后台推送不在当前范围内。详见 [上线配置与验收](deploy/上线配置与验收.md)。
 
 ## 技术栈
 
@@ -27,7 +27,7 @@ KTV 包厢点餐系统的 Java 后端，为 ktv-app 提供共享点餐业务，�
 | 项目 | 说明 | GitHub |
 | --- | --- | --- |
 | ktv-backend | 后端 API、共享订单与权限服务 | [ktv-backend](https://github.com/jiangyi3265/ktv-backend) |
-| ktv-admin | PC 运营管理基础框架 | [ktv-admin](https://github.com/jiangyi3265/ktv-admin) |
+| ktv-admin | PC 运营管理后台 | [ktv-admin](https://github.com/jiangyi3265/ktv-admin) |
 | ktv-app | 顾客、食堂配送及 KTV 移动管理客户端 | [ktv-app](https://github.com/jiangyi3265/ktv-app) |
 
 ## 快速启动
@@ -65,7 +65,7 @@ java -jar ruoyi-admin/target/ruoyi-admin.jar
 
 初始化工具会交互读取新密码（至少 12 个字符，最多 72 个 UTF-8 字节），仅允许设置空密码的 `admin`，不会重置已有账号。无交互控制台时可通过 `RUOYI_BOOTSTRAP_ADMIN_PASSWORD` 注入密码。PC 账号与移动 KTV 账号彼此独立。
 
-服务默认端口 `8080`。首次空库启动时创建 KTV 管理员 `ktv-admin` 与食堂 `A01`，使用上述环境变量中的初始密码；后续启动不覆盖已有密码。若使用 ktv-app 的 `npm run dev:api`，脚本会生成这两个账号的随机初始密码并保存在客户端忽略的 `.local/access.json` 中，应在**首次业务初始化前选择一种启动方式**。
+服务默认端口 `8080`。首次空库启动时创建 KTV 管理员 `ktv-admin` 与食堂 `A01`，使用上述环境变量中的初始密码；后续启动不覆盖已有密码。若使用 ktv-app 的 `npm run dev:api`，脚本会生成这两个账号的随机初始密码并保存在仓库外 `%LOCALAPPDATA%/KtvDining/access.json` 中，应在**首次业务初始化前选择一种启动方式**。
 
 | 配置 | 用途 |
 | --- | --- |
@@ -93,12 +93,12 @@ ruoyi-quartz/      保留的任务模块（未启用）
 sql/init.sql       无固定密码的最小初始化结构与种子数据
 ```
 
-KTV 数据存放在 `ktv_shared_state`（单门店 JSON 聚合状态）和 `ktv_session`（会话摘要）中；系统管理仍使用 `sys_*` 表。这不是拆表订单数据库或多租户系统。
+KTV 餐品、包厢与账号配置存于 `ktv_shared_state`；订单独立存于带顾客、食堂和幂等键索引的 `ktv_order`，每页100笔。`ktv_payment` 保存支付/退款编号，`ktv_audit` 保存操作日志，`ktv_qr` 保存包厢场景码，`ktv_session`/`ktv_identity` 保存会话摘要和访客恢复凭据摘要。旧 JSON 订单自动事务迁移到独立订单表，迁移前须停止旧版并备份。系统管理仍使用 `sys_*` 表。
 
 ## 验证
 
 ```bash
-mvn -pl ruoyi-admin -am package -DskipTests
+mvn -pl ruoyi-admin -am verify
 ```
 
 后端与 H5 启动后，可在 ktv-app 运行 `npm run test:shared-api` 和 `npm run test:shared-browser` 验证多会话协同、权限、订单状态与冲突处理。集成测试会写入测试订单，只用于隔离的本地测试数据库。
