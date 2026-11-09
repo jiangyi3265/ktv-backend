@@ -37,7 +37,8 @@ ktv:
     serial-number: ${KTV_WECHAT_SERIAL_NUMBER:}
     api-v3-key: ${KTV_WECHAT_API_V3_KEY:}
     code-page: pages/index/index
-    env-version: release
+    # Use trial before the first public release; switch to release after publishing.
+    env-version: ${KTV_WECHAT_ENV_VERSION:release}
 ruoyi:
   profile: ${RUOYI_UPLOAD_PATH}
 swagger:

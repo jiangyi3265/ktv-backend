@@ -104,5 +104,25 @@ class KtvServiceTest {
         String id=create();JSONObject before=service.order(customer,id);jdbc.execute("ALTER TABLE ktv_order DROP COLUMN room");
         service.initialize();service.initialize();assertEquals("A08",jdbc.queryForObject("SELECT room FROM ktv_order WHERE id=?",String.class,id));assertEquals(before,service.order(customer,id));
     }
+    @Test void paidOrderReassignsWhenOriginalKitchenDisabledDuringCheckout() {
+        customer=object("role","customer","subject","wx-test-openid");String id=create();String trade=service.paymentIntent(customer,id).getString("tradeNo");
+        service.account(admin,null,object("name","Available kitchen","password","Test-other-2026!","enabled",true,"process",true,"deliver",true));
+        JSONObject a=service.snapshot(admin).getJSONArray("accounts").getJSONObject(0);a.put("enabled",false);service.account(admin,"A01",a);
+        service.confirmPayment(trade,"tx-reassigned",6400,"now","test-openid");
+        JSONObject order=service.order(admin,id);assertTrue(order.getBooleanValue("paid"));assertEquals("A03",order.getString("supplierId"));
+        JSONObject replacement=object("role","supplier","subject","A03");service.advance(replacement,id,object("status","preparing"),false);
+        service.confirmPayment(trade,"tx-reassigned",6400,"now","test-openid");assertEquals("preparing",service.order(customer,id).getString("status"));
+    }
+    @Test void paymentWithoutAvailableKitchenIsRecordedAndCanBeAssignedByAdmin() {
+        customer=object("role","customer","subject","wx-test-openid");String id=create();String trade=service.paymentIntent(customer,id).getString("tradeNo");
+        JSONObject a=service.snapshot(admin).getJSONArray("accounts").getJSONObject(0);a.put("process",false);service.account(admin,"A01",a);
+        service.confirmPayment(trade,"tx-unassigned",6400,"now","test-openid");JSONObject order=service.order(admin,id);
+        assertTrue(order.getBooleanValue("paid"));assertTrue(order.getBooleanValue("assignmentRequired"));assertEquals("",order.getString("supplierId"));assertEquals("pending",order.getString("status"));
+        assertTrue(service.snapshot(supplier).getJSONArray("orders").isEmpty());
+        service.confirmPayment(trade,"tx-unassigned",6400,"now","test-openid");assertEquals(order.getIntValue("version"),service.order(admin,id).getIntValue("version"));
+        service.account(admin,null,object("name","Replacement kitchen","password","Test-other-2026!","enabled",true,"process",true,"deliver",true));
+        service.reassign(admin,id,object("supplierId","A03","reason","恢复接单","version",order.getIntValue("version")));
+        assertFalse(service.order(admin,id).containsKey("assignmentRequired"));assertEquals("A03",service.order(admin,id).getString("supplierId"));
+    }
     @Test void productionRejectsDemoPayment() {ReflectionTestUtils.setField(service,"production",true);assertThrows(ResponseStatusException.class,service::initialize);}
 }

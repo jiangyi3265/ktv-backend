@@ -352,7 +352,7 @@ public class KtvService {
             JSONObject a=find(state.getJSONArray("accounts"),supplierId);
             require(a!=null && a.getBooleanValue("enabled") && a.getBooleanValue("process") && a.getBooleanValue("deliver"),409,"目标食堂无完整接单权限");
             String previous=o.getString("supplierId");require(!supplierId.equals(previous),409,"订单已属于该食堂");
-            o.put("supplierId",supplierId);o.put("version",o.getIntValue("version")+1);
+            o.put("supplierId",supplierId);o.remove("assignmentRequired");o.put("version",o.getIntValue("version")+1);
             event(o,"管理员转派订单");audit(who,"order.reassign",id,object("from",previous,"to",supplierId,"reason",reason));return object("id",id);
         });
     }
@@ -402,6 +402,18 @@ public class KtvService {
             require(o!=null && o.getLongValue("totalCents")==total && ("wx-"+openid).equals(o.getString("customerId")),409,"支付金额或付款人不匹配");
             if(o.getBooleanValue("paid")) {require(transaction.equals(o.getString("transactionId")),409,"交易号不一致");return null;}
             require("unpaid".equals(o.getString("status")),409,"订单状态异常，请人工核对支付");
+            // Payment is authoritative even if the kitchen was disabled during checkout.
+            // Reassign if possible; otherwise keep a visible, paid order for admin handling.
+            JSONObject assigned=find(state.getJSONArray("accounts"),o.getString("supplierId"));
+            if(assigned==null || !assigned.getBooleanValue("enabled") || !assigned.getBooleanValue("process") || !assigned.getBooleanValue("deliver")) {
+                assigned=null;
+                for(Object raw:state.getJSONArray("accounts")) {JSONObject a=(JSONObject)raw;if(a.getBooleanValue("enabled") && a.getBooleanValue("process") && a.getBooleanValue("deliver")){assigned=a;break;}}
+                String previous=o.getString("supplierId");
+                o.put("supplierId",assigned==null?"":assigned.getString("id"));
+                if(assigned==null) o.put("assignmentRequired",true);
+                event(o,assigned==null?"等待管理员分配食堂":"支付时自动重新分配食堂");
+                audit(object("role","system","subject","wechat"),"order.payment.assignment",id,object("from",previous,"to",o.getString("supplierId")));
+            }
             jdbc.update("UPDATE ktv_payment SET transaction_id=? WHERE order_id=?",transaction,id);
             o.put("status","pending");o.put("paid",true);o.put("paymentMode","wechat");o.put("transactionId",transaction);o.put("paidAt",paidAt);o.put("version",o.getIntValue("version")+1);
             event(o,"微信支付成功");audit(object("role","system","subject","wechat"),"payment.success",id,object("transactionId",transaction,"totalCents",total));return null;

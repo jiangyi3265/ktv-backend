@@ -2,6 +2,7 @@ package com.ruoyi.framework.web.service;
 
 import javax.annotation.Resource;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
@@ -50,6 +51,10 @@ public class SysLoginService
 
     @Autowired
     private ISysConfigService configService;
+
+    // Login compatibility is configurable; password creation/change policies remain separate.
+    @Value("${user.password.loginMinLength:5}")
+    private int loginMinLength = UserConstants.PASSWORD_MIN_LENGTH;
 
     /**
      * 登录验证
@@ -142,7 +147,7 @@ public class SysLoginService
             throw new UserNotExistsException();
         }
         // 密码如果不在指定范围内 错误
-        if (password.length() < UserConstants.PASSWORD_MIN_LENGTH
+        if (password.length() < Math.max(1, loginMinLength)
                 || password.length() > UserConstants.PASSWORD_MAX_LENGTH)
         {
             AsyncManager.me().execute(AsyncFactory.recordLogininfor(username, Constants.LOGIN_FAIL, MessageUtils.message("user.password.not.match")));
