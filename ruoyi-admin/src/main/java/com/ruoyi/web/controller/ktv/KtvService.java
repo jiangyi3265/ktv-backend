@@ -115,7 +115,8 @@ public class KtvService {
         jdbc.execute("CREATE TABLE IF NOT EXISTS ktv_payment (order_id VARCHAR(80) PRIMARY KEY,trade_no VARCHAR(32) UNIQUE NOT NULL,transaction_id VARCHAR(64) UNIQUE,refund_no VARCHAR(64) UNIQUE,refund_status VARCHAR(32),created_at DATETIME NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
         jdbc.execute("CREATE TABLE IF NOT EXISTS ktv_order (id BIGINT PRIMARY KEY,customer_id VARCHAR(80) NOT NULL,supplier_id VARCHAR(40) NOT NULL,room VARCHAR(12) NOT NULL DEFAULT '',status VARCHAR(20) NOT NULL,paid BOOLEAN NOT NULL,request_key VARCHAR(80),payload LONGTEXT NOT NULL,UNIQUE(customer_id,request_key),INDEX(customer_id,id),INDEX(supplier_id,status,id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
         migrateRoomIndex();
-        if(jdbc.queryForObject("SELECT COUNT(*) FROM ktv_shared_state",Integer.class)>0) {migrateOrders();return;}
+        KtvFinanceService.createTable(jdbc);
+        if(jdbc.queryForObject("SELECT COUNT(*) FROM ktv_shared_state",Integer.class)>0) {migrateOrders();KtvFinanceService.backfill(jdbc);return;}
         require(PasswordPolicy.valid(adminPassword) && PasswordPolicy.valid(supplierPassword),503,"首次启动请配置有效的 KTV 管理员及食堂初始密码");
         JSONArray products=new JSONArray();
         String[][] rows={{"chicken","宫保鸡丁饭","主食","32","经典川味，香辣过瘾"},{"beef","黑椒牛柳饭","主食","38","黑椒浓郁，牛肉鲜嫩"},{"bites","香酥鸡米花","小吃","22","外酥里嫩，香气四溢"},{"noodle","番茄牛腩面","主食","36","浓郁番茄，软烂牛腩"}};
@@ -416,6 +417,7 @@ public class KtvService {
             }
             jdbc.update("UPDATE ktv_payment SET transaction_id=? WHERE order_id=?",transaction,id);
             o.put("status","pending");o.put("paid",true);o.put("paymentMode","wechat");o.put("transactionId",transaction);o.put("paidAt",paidAt);o.put("version",o.getIntValue("version")+1);
+            KtvFinanceService.record(jdbc,o,"receipt",transaction,paidAt);
             event(o,"微信支付成功");audit(object("role","system","subject","wechat"),"payment.success",id,object("transactionId",transaction,"totalCents",total));return null;
         });
     }
@@ -441,7 +443,7 @@ public class KtvService {
             if("refunded".equals(o.getString("status"))) return null;
             jdbc.update("UPDATE ktv_payment SET refund_status=? WHERE refund_no=?",providerStatus,refund);
             o.put("refundStatus",providerStatus);
-            if("SUCCESS".equals(providerStatus)) {o.put("status","refunded");o.put("refundedAt",LocalDateTime.now().toString());o.put("version",o.getIntValue("version")+1);event(o,"微信全额退款成功");audit(object("role","system","subject","wechat"),"refund.success",o.getString("id"),object("refundNo",refund));}
+            if("SUCCESS".equals(providerStatus)) {o.put("status","refunded");o.put("refundedAt",LocalDateTime.now().toString());o.put("version",o.getIntValue("version")+1);KtvFinanceService.record(jdbc,o,"refund",refund,o.getString("refundedAt"));event(o,"微信全额退款成功");audit(object("role","system","subject","wechat"),"refund.success",o.getString("id"),object("refundNo",refund));}
             return null;
         });
     }

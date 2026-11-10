@@ -14,7 +14,7 @@ import org.springframework.web.multipart.support.MissingServletRequestPartExcept
 import org.springframework.http.converter.HttpMessageNotReadableException;
 
 /** KTV errors use real HTTP status codes and never expose driver/provider messages. */
-@RestControllerAdvice(assignableTypes = {KtvController.class, KtvOperationsController.class})
+@RestControllerAdvice(assignableTypes = {KtvController.class, KtvOperationsController.class, KtvFinanceController.class})
 @Order(Ordered.HIGHEST_PRECEDENCE)
 public class KtvErrors {
     private static final Logger log=LoggerFactory.getLogger(KtvErrors.class);
