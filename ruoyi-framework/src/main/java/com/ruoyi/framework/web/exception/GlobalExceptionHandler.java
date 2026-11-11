@@ -16,6 +16,9 @@ import com.ruoyi.common.core.domain.AjaxResult;
 import com.ruoyi.common.core.text.Convert;
 import com.ruoyi.common.exception.DemoModeException;
 import com.ruoyi.common.exception.ServiceException;
+import com.ruoyi.common.exception.user.CaptchaException;
+import com.ruoyi.common.exception.user.CaptchaExpireException;
+import com.ruoyi.common.exception.user.UserException;
 import com.ruoyi.common.utils.StringUtils;
 import com.ruoyi.common.utils.html.EscapeUtil;
 
@@ -28,6 +31,14 @@ import com.ruoyi.common.utils.html.EscapeUtil;
 public class GlobalExceptionHandler
 {
     private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
+
+    /** Expected verification failures must not be reported as a server outage. */
+    @ExceptionHandler({CaptchaException.class, CaptchaExpireException.class})
+    public AjaxResult handleCaptchaException(UserException e)
+    {
+        return AjaxResult.error(e instanceof CaptchaExpireException
+                ? "验证码已过期，请刷新后重试" : "验证码错误，请重新输入");
+    }
 
     /**
      * 权限校验异常
