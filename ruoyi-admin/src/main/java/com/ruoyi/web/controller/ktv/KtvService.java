@@ -408,6 +408,21 @@ public class KtvService {
             return object("scene",scene,"room",id);
         });
     }
+    /** Activate only an already rendered code; provider failures must not invalidate printed codes. */
+    public void activateRoomCode(JSONObject who,String id,String expected,String scene) {
+        role(who,"admin");require(scene!=null && scene.matches("[a-f0-9]{32}"),400,"包厢码无效");
+        change(state -> {
+            JSONObject room=find(state.getJSONArray("rooms"),id);require(room!=null && room.getBooleanValue("bound"),409,"包厢已停用或变更，请刷新后重试");
+            List<String> current=jdbc.queryForList("SELECT scene FROM ktv_qr WHERE room=?",String.class,id);
+            require(current.size()==1 && current.get(0).equals(expected),409,"包厢码已被其他操作更新，请重新生成");
+            if(!scene.equals(expected)) {
+                jdbc.update("DELETE FROM ktv_qr WHERE room=?",id);
+                jdbc.update("INSERT INTO ktv_qr(scene,room) VALUES(?,?)",scene,id);
+                audit(who,"room.qr.rotate",id,new JSONObject());
+            }
+            return null;
+        });
+    }
     public JSONObject resolveRoom(String scene) {
         require(scene!=null && scene.matches("[a-f0-9]{32}"),400,"包厢码无效，请重新扫码");
         List<String> rooms=jdbc.queryForList("SELECT room FROM ktv_qr WHERE scene=?",String.class,scene);

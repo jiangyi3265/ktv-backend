@@ -34,15 +34,19 @@ public class KtvOperationsController {
     @PostMapping("/admin/password") public Object password(@RequestBody JSONObject body,HttpServletRequest request) {JSONObject who=access.who(request);service.limit("rotate:"+who.getString("subject"),5,600);return service.rotatePassword(who,body);}
     @GetMapping("/audit") public Object audit(@RequestParam(defaultValue="1") int page,HttpServletRequest request) {return service.audits(access.who(request),page);}
     @PostMapping("/rooms/{id}/qr") public Object qr(@PathVariable String id,@RequestParam(defaultValue="false") boolean rotate,@RequestParam(defaultValue="h5") String type,HttpServletRequest request) throws Exception {
-        JSONObject code=service.roomCode(access.who(request),id,rotate);String scene=code.getString("scene");byte[] bytes;
+        require(Arrays.asList("h5","mini").contains(type),400,"二维码类型无效");
+        if("h5".equals(type)) require(customerUrl.startsWith("https://") || customerUrl.startsWith("http://127.0.0.1:"),503,"请配置顾客端访问网址");
+        JSONObject who=access.who(request),code=service.roomCode(who,id,false);
+        String previous=code.getString("scene"),scene=rotate?java.util.UUID.randomUUID().toString().replace("-",""):previous;
+        code.put("scene",scene);byte[] bytes;
         if("mini".equals(type)) bytes=wechat.miniCode(scene);
         else {
-            require("h5".equals(type),400,"二维码类型无效");
-            require(customerUrl.startsWith("https://") || customerUrl.startsWith("http://127.0.0.1:"),503,"请配置顾客端访问网址");
             String url=customerUrl+(customerUrl.contains("?")?"&":"?")+"scene="+scene;code.put("url",url);
             ByteArrayOutputStream output=new ByteArrayOutputStream();MatrixToImageWriter.writeToStream(new QRCodeWriter().encode(url,BarcodeFormat.QR_CODE,430,430),"PNG",output);bytes=output.toByteArray();
         }
-        code.put("image","data:image/"+(bytes[0]==(byte)0xff?"jpeg":"png")+";base64,"+java.util.Base64.getEncoder().encodeToString(bytes));return code;
+        require(bytes!=null && bytes.length>0,502,"二维码生成失败，请重试");
+        code.put("image","data:image/"+(bytes[0]==(byte)0xff?"jpeg":"png")+";base64,"+java.util.Base64.getEncoder().encodeToString(bytes));
+        service.activateRoomCode(who,id,previous,scene);return code;
     }
     @GetMapping("/scan/{scene}") public Object scan(@PathVariable String scene,HttpServletRequest request) {service.limit("scan:"+request.getRemoteAddr(),120,60);return service.resolveRoom(scene);}
     @PostMapping("/orders/{id}/prepay") public Object prepay(@PathVariable String id,HttpServletRequest request) {JSONObject who=access.who(request);service.limit("pay:"+who.getString("subject"),10,60);require(wechat.paymentReady(),503,"微信支付尚未配置");return wechat.prepay(service.paymentIntent(who,id));}
