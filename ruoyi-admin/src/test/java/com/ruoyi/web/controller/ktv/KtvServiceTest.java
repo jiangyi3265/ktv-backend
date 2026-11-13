@@ -48,7 +48,7 @@ class KtvServiceTest {
     @Test void cancelCannotCancelPaidOrders() {String id=create();service.cancel(customer,id);service.cancel(customer,id);assertEquals("cancelled",service.order(customer,id).getString("status"));assertThrows(ResponseStatusException.class,()->service.advance(customer,id,new JSONObject(),true));}
     @Test void deliveryRequiresExplicitChecksAndActiveAccountCannotBeDisabled() {
         String id=create();service.advance(customer,id,new JSONObject(),true);JSONObject account=service.snapshot(admin).getJSONArray("accounts").getJSONObject(0);account.put("enabled",false);assertThrows(ResponseStatusException.class,()->service.account(admin,"A01",account));
-        service.advance(supplier,id,object("status","preparing"),false);assertThrows(ResponseStatusException.class,()->service.advance(supplier,id,object("status","delivering","checkedIds",new JSONArray()),false));
+        service.advance(supplier,id,object("status","preparing","checkedIds",JSONArray.of("chicken")),false);assertThrows(ResponseStatusException.class,()->service.advance(supplier,id,object("status","delivering","checkedIds",new JSONArray()),false));
         service.advance(supplier,id,object("status","delivering","checkedIds",JSONArray.of("chicken")),false);service.advance(supplier,id,object("status","completed"),false);
         assertEquals("completed",service.order(customer,id).getString("status"));assertFalse(service.order(supplier,id).containsKey("totalCents"));assertFalse(service.order(supplier,id).getJSONArray("items").getJSONObject(0).containsKey("price"));
     }
@@ -110,7 +110,7 @@ class KtvServiceTest {
         JSONObject a=service.snapshot(admin).getJSONArray("accounts").getJSONObject(0);a.put("enabled",false);service.account(admin,"A01",a);
         service.confirmPayment(trade,"tx-reassigned",6400,"now","test-openid");
         JSONObject order=service.order(admin,id);assertTrue(order.getBooleanValue("paid"));assertEquals("A03",order.getString("supplierId"));
-        JSONObject replacement=object("role","supplier","subject","A03");service.advance(replacement,id,object("status","preparing"),false);
+        JSONObject replacement=object("role","supplier","subject","A03");service.advance(replacement,id,object("status","preparing","checkedIds",JSONArray.of("chicken")),false);
         service.confirmPayment(trade,"tx-reassigned",6400,"now","test-openid");assertEquals("preparing",service.order(customer,id).getString("status"));
     }
     @Test void paymentWithoutAvailableKitchenIsRecordedAndCanBeAssignedByAdmin() {

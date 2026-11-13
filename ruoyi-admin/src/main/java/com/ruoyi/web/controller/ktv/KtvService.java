@@ -302,7 +302,7 @@ public class KtvService {
                     order.put("supplierId",assigned.getString("id"));
                 }
             }
-            if(next.equals("delivering") || (next.equals("preparing") && body.getBooleanValue("confirmStock"))) {
+            if(next.equals("delivering") || next.equals("preparing")) {
                 JSONArray checked=body.getJSONArray("checkedIds");
                 require(checked!=null,400,"请核对餐品数量");
                 for(Object raw:order.getJSONArray("items")) require(checked.contains(((JSONObject)raw).getString("id")),400,"请核对全部餐品数量");
