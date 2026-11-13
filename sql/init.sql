@@ -302,7 +302,7 @@ create table sys_config (
 insert into sys_config values(1, '主框架页-默认皮肤样式名称', 'sys.index.skinName',            'skin-blue',  'Y', 'admin', sysdate(), '', null, '');
 insert into sys_config values(2, '用户管理-账号初始密码',      'sys.user.initPassword',         '',     'Y', 'admin', sysdate(), '', null, '');
 insert into sys_config values(3, '主框架页-侧边栏主题',        'sys.index.sideTheme',           'theme-dark', 'Y', 'admin', sysdate(), '', null, '');
-insert into sys_config values(4, '账号自助-验证码开关',        'sys.account.captchaEnabled',    'true',       'Y', 'admin', sysdate(), '', null, '');
+insert into sys_config values(4, '账号自助-验证码开关',        'sys.account.captchaEnabled',    'false',      'Y', 'admin', sysdate(), '', null, '');
 insert into sys_config values(5, '账号自助-是否开启用户注册功能', 'sys.account.registerUser',    'false',      'Y', 'admin', sysdate(), '', null, '');
 
 
