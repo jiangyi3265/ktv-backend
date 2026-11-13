@@ -192,7 +192,7 @@ public class KtvService {
     public JSONObject snapshot(JSONObject who,int page,String selectedId) {return snapshot(who,page,selectedId,"","","","");}
     public JSONObject snapshot(JSONObject who,int page,String selectedId,String filter,String search,String room,String payment) {
         require(page>=1 && page<=10000,400,"页码无效");
-        require(Arrays.asList("","all","active","unpaid","pending","preparing","delivering","completed","cancelled","refunding","refunded").contains(filter),400,"订单状态筛选无效");
+        require(Arrays.asList("","all","active","unpaid","pending","preparing","delivering","completed","cancelled","refunding","refunded","stock_issue").contains(filter),400,"订单状态筛选无效");
         require(search.length()<=80 && room.length()<=12 && Arrays.asList("","paid","unpaid").contains(payment),400,"订单筛选条件无效");
         JSONObject state=read(); String role=who.getString("role");
         JSONArray orders=new JSONArray(),products=new JSONArray(),rooms=new JSONArray(),accounts=new JSONArray();
@@ -210,7 +210,7 @@ public class KtvService {
         JSONArray alerts=new JSONArray();
         if(role.equals("supplier")) for(Map<String,Object> row:jdbc.queryForList("SELECT id,room FROM ktv_order"+scope+" AND status='pending' ORDER BY id DESC LIMIT 20",params.toArray())) alerts.add(object("id",String.valueOf(row.get("id")),"room",row.get("room"),"status","pending"));
         String where=scope;
-        if(filter.equals("active"))where+=" AND status IN ('pending','preparing','delivering')";
+        if(filter.equals("active"))where+=" AND status IN ('pending','preparing','delivering','stock_issue')";
         else if(!filter.isEmpty() && !filter.equals("all")){where+=" AND status=?";params.add(filter);}
         if(!search.trim().isEmpty()){where+=" AND (LOCATE(?,CONCAT('',id))>0 OR LOCATE(?,LOWER(room))>0)";params.add(search.trim().toLowerCase(Locale.ROOT));params.add(search.trim().toLowerCase(Locale.ROOT));}
         if(!room.isEmpty()){where+=" AND room=?";params.add(room);}
@@ -227,7 +227,7 @@ public class KtvService {
             } else if(role.equals("supplier") && order.getBooleanValue("paid") && who.getString("subject").equals(order.getString("supplierId"))) {
                 JSONArray items=new JSONArray();
                 for(Object itemRaw:order.getJSONArray("items")) { JSONObject item=(JSONObject)itemRaw; items.add(object("id",item.get("id"),"name",item.get("name"),"quantity",item.get("quantity"),"image",item.get("image"),"customImage",item.get("customImage"))); }
-                orders.add(object("id",order.get("id"),"room",order.get("room"),"status",order.get("status"),"time",order.get("time"),"items",items,"events",order.get("events"),"version",order.get("version")));
+                orders.add(object("id",order.get("id"),"room",order.get("room"),"status",order.get("status"),"time",order.get("time"),"items",items,"events",order.get("events"),"version",order.get("version"),"stockIssue",order.get("stockIssue"),"dispatchAt",order.get("dispatchAt")));
             }
         }
         JSONObject detail=null;
@@ -302,11 +302,14 @@ public class KtvService {
                     order.put("supplierId",assigned.getString("id"));
                 }
             }
-            if(next.equals("delivering")) {
+            if(next.equals("delivering") || (next.equals("preparing") && body.getBooleanValue("confirmStock"))) {
                 JSONArray checked=body.getJSONArray("checkedIds");
                 require(checked!=null,400,"请核对餐品数量");
                 for(Object raw:order.getJSONArray("items")) require(checked.contains(((JSONObject)raw).getString("id")),400,"请核对全部餐品数量");
             }
+            if(body.containsKey("version")) version(order,body);
+            if(next.equals("preparing")) order.put("stockConfirmedAt",LocalDateTime.now().toString());
+            if(payment) {order.put("dispatchRound",1);order.put("dispatchAt",LocalDateTime.now().toString());}
             order.put("status",next); order.put("paid",true); order.put("version",order.getIntValue("version")+1);
             String label=next.equals("pending")?"模拟支付成功":next.equals("preparing")?"食堂接单":next.equals("delivering")?"开始配送":"配送方确认送达";
             event(order,label); if(payment) { order.put("paymentMode","demo");order.put("paidAt",LocalDateTime.now().toString()); }
@@ -332,7 +335,7 @@ public class KtvService {
         found.remove("requestKey");found.remove("requestHash");formatOrderTime(found);
         if("supplier".equals(role)) {
             supplier(read(),who);JSONArray items=new JSONArray();for(Object raw:found.getJSONArray("items")) {JSONObject item=(JSONObject)raw;items.add(object("id",item.get("id"),"name",item.get("name"),"quantity",item.get("quantity"),"image",item.get("image"),"customImage",item.get("customImage")));}
-            return object("id",found.get("id"),"room",found.get("room"),"status",found.get("status"),"time",found.get("time"),"items",items,"events",found.get("events"),"version",found.get("version"));
+            return object("id",found.get("id"),"room",found.get("room"),"status",found.get("status"),"time",found.get("time"),"items",items,"events",found.get("events"),"version",found.get("version"),"stockIssue",found.get("stockIssue"),"dispatchAt",found.get("dispatchAt"));
         }
         return found;
     }
@@ -349,14 +352,42 @@ public class KtvService {
         role(who,"admin");String supplierId=text(body,"supplierId",40),reason=text(body,"reason",200);
         return change(id,state -> {
             JSONObject o=find(state.getJSONArray("orders"),id);version(o,body);
-            require(Arrays.asList("pending","preparing","delivering").contains(o.getString("status")),409,"当前订单不能转派");
+            require(Arrays.asList("pending","preparing","delivering","stock_issue").contains(o.getString("status")),409,"当前订单不能转派");
             JSONObject a=find(state.getJSONArray("accounts"),supplierId);
             require(a!=null && a.getBooleanValue("enabled") && a.getBooleanValue("process") && a.getBooleanValue("deliver"),409,"目标食堂无完整接单权限");
             String previous=o.getString("supplierId");require(!supplierId.equals(previous),409,"订单已属于该食堂");
-            o.put("supplierId",supplierId);o.remove("assignmentRequired");o.put("version",o.getIntValue("version")+1);
+            o.put("supplierId",supplierId);o.remove("assignmentRequired");o.put("dispatchStatus",o.getString("status"));
+            if("stock_issue".equals(o.getString("status"))) {o.put("status","pending");o.remove("stockIssue");}
+            o.put("dispatchRound",o.getIntValue("dispatchRound")+1);o.put("dispatchAt",LocalDateTime.now().toString());o.put("version",o.getIntValue("version")+1);
             event(o,"管理员转派订单");audit(who,"order.reassign",id,object("from",previous,"to",supplierId,"reason",reason));return object("id",id);
         });
     }
+    /** The supplier reports an exception; only the merchant decides reassignment or refund. */
+    public JSONObject reportStockIssue(JSONObject who,String id,JSONObject body) {
+        role(who,"supplier");String reason=text(body,"reason",200);
+        JSONArray missing=body.getJSONArray("itemIds");require(missing!=null && !missing.isEmpty() && missing.size()<=50,400,"请选择缺货餐品");
+        return change(id,state -> {
+            JSONObject account=supplier(state,who);require(account.getBooleanValue("process"),403,"当前账号暂无备货权限");JSONObject o=find(state.getJSONArray("orders"),id);
+            require(o!=null && o.getBooleanValue("paid") && who.getString("subject").equals(o.getString("supplierId")),403,"无权处理该订单");
+            require(Arrays.asList("pending","preparing").contains(o.getString("status")),409,"订单状态已变化，请刷新后重试");version(o,body);
+            JSONArray items=new JSONArray();Set<String> seen=new HashSet<>();
+            for(Object raw:missing) {require(raw instanceof String && seen.add((String)raw),400,"缺货餐品无效");JSONObject item=find(o.getJSONArray("items"),(String)raw);require(item!=null,400,"缺货餐品不属于此订单");items.add(object("id",item.get("id"),"name",item.get("name"),"quantity",item.get("quantity")));}
+            o.put("stockIssue",object("reason",reason,"items",items,"reportedAt",LocalDateTime.now().toString()));
+            o.put("status","stock_issue");o.put("version",o.getIntValue("version")+1);
+            event(o,"备货方反馈缺货，等待商家处理");audit(who,"order.stock-issue",id,copy(o.getJSONObject("stockIssue")));return object("id",id);
+        });
+    }
+    public JSONObject resumeStockOrder(JSONObject who,String id,JSONObject body) {
+        role(who,"admin");String reason=text(body,"reason",200);
+        return change(id,state -> {
+            JSONObject o=find(state.getJSONArray("orders"),id);version(o,body);require("stock_issue".equals(o.getString("status")),409,"订单已处理，请刷新");
+            JSONObject a=find(state.getJSONArray("accounts"),o.getString("supplierId"));
+            require(a!=null && a.getBooleanValue("enabled") && a.getBooleanValue("process") && a.getBooleanValue("deliver"),409,"原备货账号不可用，请转派其他账号");
+            o.remove("stockIssue");o.put("status","pending");o.put("dispatchRound",o.getIntValue("dispatchRound")+1);o.put("dispatchAt",LocalDateTime.now().toString());o.put("version",o.getIntValue("version")+1);
+            event(o,"商家确认已补货，等待重新接单");audit(who,"order.stock-resume",id,object("reason",reason));return object("id",id);
+        });
+    }
+    public void requireStaff(JSONObject who) {require(Arrays.asList("admin","supplier").contains(who.getString("role")),403,"仅工作人员可使用通知设置");if("supplier".equals(who.getString("role")))supplier(read(),who);}
     public JSONObject rotatePassword(JSONObject who,JSONObject body) {
         role(who,"admin");String old=body.getString("oldPassword"),next=body.getString("password");
         require(PasswordPolicy.valid(next) && old!=null && old.getBytes(StandardCharsets.UTF_8).length<=72,400,"新密码至少12个字符，UTF-8编码不得超过72字节");
@@ -418,7 +449,7 @@ public class KtvService {
             jdbc.update("UPDATE ktv_payment SET transaction_id=? WHERE order_id=?",transaction,id);
             o.put("status","pending");o.put("paid",true);o.put("paymentMode","wechat");o.put("transactionId",transaction);o.put("paidAt",paidAt);o.put("version",o.getIntValue("version")+1);
             KtvFinanceService.record(jdbc,o,"receipt",transaction,paidAt);
-            event(o,"微信支付成功");audit(object("role","system","subject","wechat"),"payment.success",id,object("transactionId",transaction,"totalCents",total));return null;
+            o.put("dispatchRound",1);o.put("dispatchAt",LocalDateTime.now().toString());event(o,"微信支付成功");audit(object("role","system","subject","wechat"),"payment.success",id,object("transactionId",transaction,"totalCents",total));return null;
         });
     }
     public JSONObject refundIntent(JSONObject who,String id,JSONObject body) {
@@ -495,7 +526,7 @@ public class KtvService {
             String password=body.getString("password");
             if(existing==null || (password!=null&&!password.isEmpty())) require(PasswordPolicy.valid(password),400,"密码至少12个字符，UTF-8编码不得超过72字节");
             if(existing!=null && (!body.getBooleanValue("enabled") || !body.getBooleanValue("process") || !body.getBooleanValue("deliver")))
-                require(jdbc.queryForObject("SELECT COUNT(*) FROM ktv_order WHERE supplier_id=? AND status IN ('pending','preparing','delivering')",Integer.class,id)==0,409,"该食堂仍有进行中订单，请先完成或转派后再停用权限");
+                require(jdbc.queryForObject("SELECT COUNT(*) FROM ktv_order WHERE supplier_id=? AND status IN ('pending','preparing','delivering','stock_issue')",Integer.class,id)==0,409,"该食堂仍有进行中订单，请先完成或转派后再停用权限");
             String accountId=id==null?"A"+String.format("%02d",state.getJSONArray("accounts").size()+1):id;
             JSONObject a=object("id",accountId,"name",name,"enabled",body.getBooleanValue("enabled"),"process",body.getBooleanValue("process"),"deliver",body.getBooleanValue("deliver"),"version",existing==null?1:existing.getIntValue("version")+1,"passwordHash",password!=null&&!password.isEmpty()?passwords.encode(password):existing.getString("passwordHash"));
             if(existing==null) state.getJSONArray("accounts").add(a); else {existing.clear();existing.putAll(a);}

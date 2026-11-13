@@ -74,6 +74,20 @@ public class KtvWechat {
         byte[] bytes=http.postForObject("https://api.weixin.qq.com/wxa/getwxacodeunlimit?access_token={token}",object("scene",scene,"page",codePage,"check_path","release".equals(envVersion),"env_version",envVersion,"width",430),byte[].class,accessToken());
         require(bytes!=null && bytes.length>8 && ((bytes[0]==(byte)0x89 && bytes[1]==0x50) || (bytes[0]==(byte)0xff && bytes[1]==(byte)0xd8)),502,"小程序码生成失败，请核对发布页面和微信配置");return bytes;
     }
+    public JSONObject notificationTemplates() {
+        JSONObject result=JSON.parseObject(http.getForObject("https://api.weixin.qq.com/wxaapi/newtmpl/gettemplate?access_token={token}",String.class,accessToken()));
+        require(result!=null && result.getIntValue("errcode")==0,502,"微信通知模板读取失败");return result;
+    }
+    public int sendSubscription(String openid,String template,JSONObject data,String page) {
+        String state="release".equals(envVersion)?"formal":"develop".equals(envVersion)?"developer":"trial";
+        JSONObject result=JSON.parseObject(http.postForObject("https://api.weixin.qq.com/cgi-bin/message/subscribe/send?access_token={token}",object("touser",openid,"template_id",template,"data",data,"page",page,"miniprogram_state",state),String.class,accessToken()));
+        require(result!=null && result.containsKey("errcode"),502,"微信通知响应无效");return result.getIntValue("errcode");
+    }
+    public int sendGroupNotice(String webhook,String content) {
+        require(webhook!=null && webhook.matches("https://qyapi\\.weixin\\.qq\\.com/cgi-bin/webhook/send\\?key=[a-zA-Z0-9-]{16,100}"),400,"请填写有效的企业微信群机器人地址");
+        JSONObject result=JSON.parseObject(http.postForObject(webhook,object("msgtype","text","text",object("content",content)),String.class));
+        require(result!=null && result.containsKey("errcode"),502,"群通知响应无效");return result.getIntValue("errcode");
+    }
     public JSONObject prepay(JSONObject order) {
         require(paymentReady(),503,"微信支付尚未配置");
         PrepayRequest request=new PrepayRequest();request.setAppid(appId);request.setMchid(merchant);request.setOutTradeNo(order.getString("tradeNo"));request.setDescription("KTV 包厢餐食");request.setNotifyUrl(apiUrl+"/ktv-api/wechat/payment-notify");

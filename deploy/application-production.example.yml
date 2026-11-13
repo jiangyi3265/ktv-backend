@@ -18,6 +18,10 @@ spring:
 token:
   secret: ${JWT_SECRET}
 ktv:
+  notifications:
+    enabled: true
+    encryption-key: ${KTV_NOTIFICATION_ENCRYPTION_KEY:}
+    overdue-minutes: 5
   production: true
   demo-payment-enabled: false
   bootstrap-admin-password: ${KTV_BOOTSTRAP_ADMIN_PASSWORD:}
