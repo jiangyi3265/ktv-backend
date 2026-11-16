@@ -69,8 +69,9 @@ public class KtvService {
             JSONArray orders=new JSONArray();
             if(orderId!=null) for(String payload:jdbc.queryForList("SELECT payload FROM ktv_order WHERE id=? FOR UPDATE",String.class,orderId)) orders.add(JSON.parseObject(payload));
             state.put("orders",orders);
+            Map<String,JSONObject> before=new HashMap<>();for(Object raw:orders){JSONObject o=(JSONObject)raw;before.put(o.getString("id"),copy(o));}
             T result=action.apply(state);
-            for(Object raw:state.getJSONArray("orders")) saveOrder((JSONObject)raw);
+            for(Object raw:state.getJSONArray("orders")) {JSONObject o=(JSONObject)raw;saveOrder(o);KtvOrderNoticeEvents.record(jdbc,before.get(o.getString("id")),o);}
             state.remove("orders");
             state.put("revision",state.getLongValue("revision")+1);
             jdbc.update("UPDATE ktv_shared_state SET payload=? WHERE id=1",state.toJSONString());
@@ -106,6 +107,7 @@ public class KtvService {
     @PostConstruct
     public void initialize() {
         require(!production || !demoPayment,503,"生产环境禁止开启演示支付");
+        KtvOrderNoticeEvents.initialize(jdbc);
         jdbc.execute("CREATE TABLE IF NOT EXISTS ktv_shared_state (id INT PRIMARY KEY,payload LONGTEXT NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
         jdbc.execute("CREATE TABLE IF NOT EXISTS ktv_session (token_hash VARCHAR(64) PRIMARY KEY,role VARCHAR(16) NOT NULL,subject VARCHAR(80) NOT NULL,expires_at DATETIME NOT NULL,INDEX(expires_at)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
         jdbc.execute("CREATE TABLE IF NOT EXISTS ktv_identity (recovery_hash VARCHAR(64) PRIMARY KEY,subject VARCHAR(80) NOT NULL,created_at DATETIME NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");

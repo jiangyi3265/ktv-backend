@@ -10,7 +10,13 @@ import javax.servlet.http.HttpServletRequest;
 @Component
 public class KtvAccess {
     private final KtvService service;
+    @org.springframework.beans.factory.annotation.Autowired private com.ruoyi.framework.web.service.TokenService tokens;
     public KtvAccess(KtvService service) {this.service=service;}
+    public void logout(HttpServletRequest request) {
+        if(request.getHeader("X-KTV-Token")!=null) {service.logout(request.getHeader("X-KTV-Token"));return;}
+        Authentication auth=SecurityUtils.getAuthentication();
+        if(auth!=null && auth.getPrincipal() instanceof LoginUser) tokens.delLoginUser(((LoginUser)auth.getPrincipal()).getToken());
+    }
     public JSONObject who(HttpServletRequest request) {
         if(request.getHeader("X-KTV-Token")!=null) return service.identity(request.getHeader("X-KTV-Token"));
         Authentication auth=SecurityUtils.getAuthentication();

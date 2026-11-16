@@ -29,7 +29,7 @@ public class KtvController {
     private JSONObject who(HttpServletRequest request) { return access.who(request); }
     @PostMapping("/sessions/customer") public Object customer(@RequestBody(required=false) JSONObject body,HttpServletRequest request) {service.limit("customer:"+request.getRemoteAddr(),30,60);return service.customerSession(body); }
     @PostMapping("/sessions/staff") public Object staff(@RequestBody JSONObject body,HttpServletRequest request) { return service.staffSession(body,request.getRemoteAddr()); }
-    @DeleteMapping("/session") public Object logout(HttpServletRequest request) { service.logout(request.getHeader("X-KTV-Token")); return KtvService.object("ok",true); }
+    @DeleteMapping("/session") public Object logout(HttpServletRequest request) { access.logout(request); return KtvService.object("ok",true); }
     @GetMapping("/state") public Object state(@RequestParam(defaultValue="1") int page,@RequestParam(required=false) String orderId,@RequestParam(defaultValue="") String filter,@RequestParam(defaultValue="") String search,@RequestParam(defaultValue="") String room,@RequestParam(defaultValue="") String payment,HttpServletRequest request) { JSONObject result=service.snapshot(who(request),page,orderId,filter,search,room,payment);result.put("wechatPayment",wechat.paymentReady());return result; }
     @PostMapping("/orders") public Object order(@RequestBody JSONObject body,HttpServletRequest request) {JSONObject who=who(request);service.limit("order:"+who.getString("subject"),20,60);return service.createOrder(who,body); }
     @PostMapping("/orders/{id}/pay-demo") public Object pay(@PathVariable String id,HttpServletRequest request) { return service.advance(who(request),id,new JSONObject(),true); }

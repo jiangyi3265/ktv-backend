@@ -70,8 +70,12 @@ public class KtvWechat {
         accessToken=result.getString("access_token");tokenExpires=System.currentTimeMillis()+Math.max(60,result.getIntValue("expires_in")-120)*1000L;return accessToken;
     }
     public byte[] miniCode(String scene) {
+        return miniCode(scene,codePage);
+    }
+    public byte[] miniAdminCode() {return miniCode("admin-notices","pages/admin/index");}
+    private byte[] miniCode(String scene,String page) {
         require(Arrays.asList("release","trial","develop").contains(envVersion),503,"小程序版本配置无效");
-        byte[] bytes=http.postForObject("https://api.weixin.qq.com/wxa/getwxacodeunlimit?access_token={token}",object("scene",scene,"page",codePage,"check_path","release".equals(envVersion),"env_version",envVersion,"width",430),byte[].class,accessToken());
+        byte[] bytes=http.postForObject("https://api.weixin.qq.com/wxa/getwxacodeunlimit?access_token={token}",object("scene",scene,"page",page,"check_path","release".equals(envVersion),"env_version",envVersion,"width",430),byte[].class,accessToken());
         require(bytes!=null && bytes.length>8 && ((bytes[0]==(byte)0x89 && bytes[1]==0x50) || (bytes[0]==(byte)0xff && bytes[1]==(byte)0xd8)),502,"小程序码生成失败，请核对发布页面和微信配置");return bytes;
     }
     public JSONObject notificationTemplates() {

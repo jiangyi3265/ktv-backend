@@ -14,7 +14,8 @@ public class KtvNoticeController {
     public KtvNoticeController(KtvNoticeService notices,KtvAccess access,KtvService service){this.notices=notices;this.access=access;this.service=service;}
     @ModelAttribute public void headers(HttpServletResponse response){response.setHeader("Cache-Control","no-store");}
     @GetMapping("/status") public Object status(HttpServletRequest request){return notices.status(access.who(request));}
-    @PostMapping("/bind") public Object bind(@RequestBody JSONObject body,HttpServletRequest request){JSONObject who=access.who(request);service.requireStaff(who);service.limit("notice-bind:"+who.getString("subject"),10,60);return notices.bind(who,text(body,"code",256));}
+    @PostMapping("/bind") public Object bind(@RequestBody JSONObject body,HttpServletRequest request){JSONObject who=access.who(request);service.limit("notice-bind:"+who.getString("subject"),10,60);return notices.bind(who,text(body,"code",256));}
+    @GetMapping("/admin-entry") public org.springframework.http.ResponseEntity<byte[]> adminEntry(HttpServletRequest request){JSONObject who=access.who(request);service.limit("notice-entry:"+who.getString("subject"),10,60);byte[] code=notices.adminEntry(who);return org.springframework.http.ResponseEntity.ok().contentType(code[0]==(byte)0xff?org.springframework.http.MediaType.IMAGE_JPEG:org.springframework.http.MediaType.IMAGE_PNG).body(code);}
     @PostMapping("/subscribe") public Object subscribe(@RequestBody JSONObject body,HttpServletRequest request){return notices.subscribe(access.who(request),body);}
     @DeleteMapping("/bind") public Object unbind(HttpServletRequest request){notices.unbind(access.who(request));return object("ok",true);}
     @GetMapping("/admin") public Object admin(HttpServletRequest request){return notices.admin(access.who(request));}
