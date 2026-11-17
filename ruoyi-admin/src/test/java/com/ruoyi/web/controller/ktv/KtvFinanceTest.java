@@ -17,7 +17,7 @@ class KtvFinanceTest {
     @BeforeEach void setup(){
         DriverManagerDataSource ds=new DriverManagerDataSource("jdbc:h2:mem:"+UUID.randomUUID()+";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE","sa","");
         jdbc=new JdbcTemplate(ds);service=new KtvService(jdbc,new TransactionTemplate(new DataSourceTransactionManager(ds)));
-        ReflectionTestUtils.setField(service,"adminPassword","Test-admin-2026!");ReflectionTestUtils.setField(service,"supplierPassword","Test-supplier-2026!");ReflectionTestUtils.setField(service,"demoPayment",true);service.initialize();finance=new KtvFinanceService(jdbc);
+        ReflectionTestUtils.setField(service,"adminPassword","Test-admin-2026!");ReflectionTestUtils.setField(service,"supplierPassword","Test-supplier-2026!");ReflectionTestUtils.setField(service,"demoPayment",true);service.initialize();service.orderingSettings(object("role","admin","subject","ktv-admin"),object("enabled",true,"version",1));finance=new KtvFinanceService(jdbc);
     }
     String order(){return service.createOrder(customer,object("room","A08","scene",service.roomCode(admin,"A08",false).getString("scene"),"requestKey",UUID.randomUUID().toString(),"items",JSONArray.of(object("id","chicken","quantity",1)))).getString("id");}
     String pay(String id){String trade=service.paymentIntent(customer,id).getString("tradeNo");service.confirmPayment(trade,"transaction-"+id,3200,"2026-11-09T20:30:00Z","finance-test");return trade;}

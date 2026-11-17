@@ -24,7 +24,7 @@ class KtvServiceTest {
     @BeforeEach void setup() {
         DriverManagerDataSource ds=new DriverManagerDataSource("jdbc:h2:mem:"+UUID.randomUUID()+";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE","sa","");
         jdbc=new JdbcTemplate(ds);service=new KtvService(jdbc,new TransactionTemplate(new DataSourceTransactionManager(ds)));
-        ReflectionTestUtils.setField(service,"adminPassword","Test-admin-2026!");ReflectionTestUtils.setField(service,"supplierPassword","Test-supplier-2026!");ReflectionTestUtils.setField(service,"demoPayment",true);service.initialize();
+        ReflectionTestUtils.setField(service,"adminPassword","Test-admin-2026!");ReflectionTestUtils.setField(service,"supplierPassword","Test-supplier-2026!");ReflectionTestUtils.setField(service,"demoPayment",true);service.initialize();service.orderingSettings(object("role","admin","subject","ktv-admin"),object("enabled",true,"version",1));
         admin=object("role","admin","subject","ktv-admin");customer=object("role","customer","subject","customer-test");supplier=object("role","supplier","subject","A01");scene=service.roomCode(admin,"A08",false).getString("scene");
     }
     JSONObject draft(String key) {return object("room","A08","scene",scene,"requestKey",key,"items",JSONArray.of(object("id","chicken","quantity",2)));}

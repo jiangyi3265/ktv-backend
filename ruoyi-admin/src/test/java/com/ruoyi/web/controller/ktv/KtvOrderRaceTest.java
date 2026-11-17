@@ -25,7 +25,7 @@ class KtvOrderRaceTest {
         DriverManagerDataSource ds=new DriverManagerDataSource("jdbc:h2:mem:"+UUID.randomUUID()+";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE","sa","");
         jdbc=new JdbcTemplate(ds); service=new KtvService(jdbc,new TransactionTemplate(new DataSourceTransactionManager(ds)));
         ReflectionTestUtils.setField(service,"adminPassword","Fixture-race-admin-2026!");
-        ReflectionTestUtils.setField(service,"supplierPassword","Fixture-race-worker-2026!"); service.initialize();
+        ReflectionTestUtils.setField(service,"supplierPassword","Fixture-race-worker-2026!"); service.initialize();service.orderingSettings(object("role","admin","subject","ktv-admin"),object("enabled",true,"version",1));
     }
     String paidOrder() {
         String scene=service.roomCode(admin,"A08",false).getString("scene");

@@ -64,6 +64,24 @@ public class KtvService {
         return null;
     }
     private JSONObject read() { return JSON.parseObject(jdbc.queryForObject("SELECT payload FROM ktv_shared_state WHERE id=1",String.class)); }
+    private JSONObject ordering(JSONObject state) {
+        JSONObject settings=state.getJSONObject("ordering");
+        return settings==null?object("enabled",false,"version",1):copy(settings);
+    }
+    private boolean orderingEnabled(JSONObject state) {return ordering(state).getBooleanValue("enabled");}
+    private void requireOrdering(JSONObject state) {require(orderingEnabled(state),409,"点餐服务已暂停，暂时不能下单或支付");}
+    public JSONObject orderingSettings(JSONObject who,JSONObject body) {
+        role(who,"admin");
+        require(body!=null && body.get("enabled") instanceof Boolean,400,"请选择是否开放点餐");
+        return change(state -> {
+            JSONObject previous=ordering(state);
+            require(body.get("version") instanceof Number && body.getDoubleValue("version")==body.getLongValue("version") && body.getLongValue("version")==previous.getLongValue("version"),409,"营业状态已被其他管理员修改，请刷新后重试");
+            JSONObject next=object("enabled",body.getBooleanValue("enabled"),"version",previous.getLongValue("version")+1,"updatedAt",LocalDateTime.now().toString());
+            state.put("ordering",next);
+            audit(who,"store.ordering", "store",object("before",previous,"after",next));
+            return copy(next);
+        });
+    }
     private <T> T change(Function<JSONObject,T> action) {return change(null,action);}
     private <T> T change(String orderId,Function<JSONObject,T> action) {
         return tx.execute(status -> {
@@ -228,7 +246,7 @@ public class KtvService {
         JSONArray orders=new JSONArray(),products=new JSONArray(),rooms=new JSONArray(),accounts=new JSONArray();
         if(role.equals("supplier")) { JSONObject account=copy(supplier(state,who)); account.remove("passwordHash"); accounts.add(account); }
         else {
-            for(Object raw:state.getJSONArray("products")) { JSONObject p=(JSONObject)raw; if(role.equals("admin") || p.getBooleanValue("onSale")) products.add(p); }
+            for(Object raw:state.getJSONArray("products")) { JSONObject p=(JSONObject)raw; if(role.equals("admin") || (orderingEnabled(state) && p.getBooleanValue("onSale"))) products.add(p); }
             for(Object raw:state.getJSONArray("rooms")) { JSONObject item=(JSONObject)raw; if(role.equals("admin") || item.getBooleanValue("bound")) rooms.add(item); }
         }
         if(role.equals("admin")) for(Object raw:state.getJSONArray("accounts")) { JSONObject a=copy((JSONObject)raw); a.remove("passwordHash"); accounts.add(a); }
@@ -262,7 +280,7 @@ public class KtvService {
         }
         JSONObject detail=null;
         if(selectedId!=null && !selectedId.isEmpty()) {try{detail=order(who,selectedId);}catch(ResponseStatusException e){if(e.getRawStatusCode()!=404)throw e;}}
-        return object("revision",state.get("revision"),"role",role,"subject",who.get("subject"),"products",products,"rooms",rooms,"accounts",accounts,"orders",orders,"orderDetail",detail,"orderCounts",counts,"orderAlerts",alerts,"page",page,"hasMore",hasMore,"demoPayment",demoPayment);
+        return object("revision",state.get("revision"),"role",role,"subject",who.get("subject"),"products",products,"rooms",rooms,"accounts",accounts,"orders",orders,"orderDetail",detail,"orderCounts",counts,"orderAlerts",alerts,"page",page,"hasMore",hasMore,"demoPayment",demoPayment,"orderingEnabled",orderingEnabled(state),"ordering",role.equals("admin")?ordering(state):null);
     }
     private void formatOrderTime(JSONObject order) {
         String created=order.getString("createdAt");
@@ -276,6 +294,7 @@ public class KtvService {
         require(requested!=null && requested.size()>0 && requested.size()<=50,400,"请选择餐品");
         String fingerprint=hash(room+requested.toJSONString());
         return change(state -> {
+            requireOrdering(state);
             for(String payload:jdbc.queryForList("SELECT payload FROM ktv_order WHERE customer_id=? AND request_key=?",String.class,who.getString("subject"),key)) { JSONObject existing=JSON.parseObject(payload);
                 if(who.getString("subject").equals(existing.getString("customerId")) && key.equals(existing.getString("requestKey"))) {
                     require(fingerprint.equals(existing.getString("requestHash")),409,"请求编号已用于另一张订单"); return object("id",existing.getString("id"));
@@ -312,6 +331,7 @@ public class KtvService {
         if(payment) { role(who,"customer"); require(demoPayment,403,"模拟支付已关闭，请接入微信支付"); }
         else role(who,"supplier");
         return change(id,state -> {
+            if(payment) requireOrdering(state);
             JSONObject order=find(state.getJSONArray("orders"),id); require(order!=null,404,"订单不存在");
             String next=payment?"pending":text(body,"status",20),current=order.getString("status");
             if(payment) require(who.getString("subject").equals(order.getString("customerId")),403,"无权支付该订单");
@@ -465,6 +485,7 @@ public class KtvService {
     public JSONObject paymentIntent(JSONObject who,String id) {
         role(who,"customer");require(who.getString("subject").startsWith("wx-"),409,"请在微信小程序中登录后支付");
         return change(id,state -> {
+            requireOrdering(state);
             JSONObject o=find(state.getJSONArray("orders"),id);require(o!=null && who.getString("subject").equals(o.getString("customerId")),404,"订单不存在");
             require("unpaid".equals(o.getString("status")),409,"订单状态已变化，请刷新");
             jdbc.update("INSERT IGNORE INTO ktv_payment(order_id,trade_no,created_at) VALUES(?,?,NOW())",id,UUID.randomUUID().toString().replace("-",""));
