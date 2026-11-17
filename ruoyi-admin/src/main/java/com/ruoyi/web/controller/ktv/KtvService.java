@@ -32,6 +32,8 @@ public class KtvService {
     @Value("${ktv.demo-payment-enabled:false}") private boolean demoPayment;
     @Value("${ktv.production:false}") private boolean production;
     @Value("${ktv.upload-path:./data/ktv-uploads}") private String uploadPath;
+    @org.springframework.beans.factory.annotation.Autowired private KtvPcAccountPolicy pcAccounts;
+    private static final int STAFF_IDLE_DAYS=30;
 
     public KtvService(JdbcTemplate jdbc, TransactionTemplate tx) { this.jdbc=jdbc; this.tx=tx; }
     public static JSONObject object(Object... pairs) {
@@ -110,6 +112,10 @@ public class KtvService {
         KtvOrderNoticeEvents.initialize(jdbc);
         jdbc.execute("CREATE TABLE IF NOT EXISTS ktv_shared_state (id INT PRIMARY KEY,payload LONGTEXT NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
         jdbc.execute("CREATE TABLE IF NOT EXISTS ktv_session (token_hash VARCHAR(64) PRIMARY KEY,role VARCHAR(16) NOT NULL,subject VARCHAR(80) NOT NULL,expires_at DATETIME NOT NULL,INDEX(expires_at)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+        boolean sessionCredentialExists=Boolean.TRUE.equals(jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Boolean>) connection -> {
+            try(java.sql.ResultSet columns=connection.getMetaData().getColumns(connection.getCatalog(),null,"ktv_session","credential_version")){return columns.next();}
+        }));
+        if(!sessionCredentialExists) jdbc.execute("ALTER TABLE ktv_session ADD COLUMN credential_version VARCHAR(64) NULL");
         jdbc.execute("CREATE TABLE IF NOT EXISTS ktv_identity (recovery_hash VARCHAR(64) PRIMARY KEY,subject VARCHAR(80) NOT NULL,created_at DATETIME NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
         jdbc.execute("CREATE TABLE IF NOT EXISTS ktv_audit (id BIGINT AUTO_INCREMENT PRIMARY KEY,actor VARCHAR(100) NOT NULL,action VARCHAR(60) NOT NULL,target VARCHAR(80),detail TEXT,created_at DATETIME NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
         jdbc.execute("CREATE TABLE IF NOT EXISTS ktv_qr (scene VARCHAR(32) PRIMARY KEY,room VARCHAR(12) NOT NULL UNIQUE) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
@@ -171,17 +177,39 @@ public class KtvService {
         });
         require(count<=maximum,429,"操作过于频繁，请稍后重试");
     }
-    private JSONObject session(String role,String subject) {
+    private JSONObject session(String role,String subject) {return session(role,subject,null);}
+    private JSONObject session(String role,String subject,String credential) {
         String token=token();
         jdbc.update("DELETE FROM ktv_session WHERE expires_at<NOW()");
-        jdbc.update("INSERT INTO ktv_session(token_hash,role,subject,expires_at) VALUES(?,?,?,?)",hash(token),role,subject,LocalDateTime.now().plusHours(role.equals("customer")?720:8));
+        jdbc.update("INSERT INTO ktv_session(token_hash,role,subject,expires_at,credential_version) VALUES(?,?,?,?,?)",hash(token),role,subject,LocalDateTime.now().plusDays(STAFF_IDLE_DAYS),credential);
         return object("token",token,"role",role,"subject",subject);
+    }
+    JSONObject pcAdminSession(long userId,String credential) {
+        require(pcAccounts.matches(userId,credential),401,"账号权限或密码已变更，请重新登录");
+        return session("admin","pc-"+userId,credential);
     }
     public JSONObject identity(String token) {
         require(token!=null && token.length()>=32,401,"请登录后继续");
-        List<Map<String,Object>> rows=jdbc.queryForList("SELECT role,subject FROM ktv_session WHERE token_hash=? AND expires_at>NOW()",hash(token));
+        List<Map<String,Object>> rows=jdbc.queryForList("SELECT role,subject,credential_version FROM ktv_session WHERE token_hash=? AND expires_at>NOW()",hash(token));
         require(!rows.isEmpty(),401,"登录已过期，请重新登录");
-        return object("role",rows.get(0).get("role"),"subject",rows.get(0).get("subject"));
+        Map<String,Object> row=rows.get(0);
+        JSONObject who=object("role",row.get("role"),"subject",row.get("subject"));
+        String role=who.getString("role"),subject=who.getString("subject");
+        if("admin".equals(role) && subject.startsWith("pc-")) {
+            if(!pcAccounts.matches(Long.parseLong(subject.substring(3)),(String)row.get("credential_version"))) {
+                logout(token);require(false,401,"账号权限或密码已变更，请重新登录");
+            }
+        } else if("supplier".equals(role)) {
+            JSONObject account=find(read().getJSONArray("accounts"),subject);
+            if(account==null || !account.getBooleanValue("enabled")) {logout(token);require(false,401,"食堂账号已停用，请联系管理员");}
+        }
+        // Renew valid staff sessions at most once per day; expired or revoked tokens are never restored.
+        if("admin".equals(role) || "supplier".equals(role)) {
+            LocalDateTime now=LocalDateTime.now();
+            jdbc.update("UPDATE ktv_session SET expires_at=? WHERE token_hash=? AND expires_at>NOW() AND expires_at<?",now.plusDays(STAFF_IDLE_DAYS),hash(token),now.plusDays(STAFF_IDLE_DAYS-1));
+            require(jdbc.queryForObject("SELECT COUNT(*) FROM ktv_session WHERE token_hash=? AND expires_at>NOW()",Integer.class,hash(token))==1,401,"登录已失效，请重新登录");
+        }
+        return who;
     }
     public void logout(String token) { if(token!=null) jdbc.update("DELETE FROM ktv_session WHERE token_hash=?",hash(token)); }
     private void role(JSONObject who,String role) { require(role.equals(who.getString("role")),403,"当前账号无权执行此操作"); }
@@ -395,7 +423,7 @@ public class KtvService {
         require(PasswordPolicy.valid(next) && old!=null && old.getBytes(StandardCharsets.UTF_8).length<=72,400,"新密码至少12个字符，UTF-8编码不得超过72字节");
         return change(state -> {
             require("ktv-admin".equals(who.getString("subject")) && passwords.matches(old,state.getString("adminHash")),403,"原密码错误");
-            state.put("adminHash",passwords.encode(next));jdbc.update("DELETE FROM ktv_session WHERE role='admin'");audit(who,"admin.password.rotate","ktv-admin",new JSONObject());return object("ok",true);
+            state.put("adminHash",passwords.encode(next));jdbc.update("DELETE FROM ktv_session WHERE role='admin' AND subject='ktv-admin'");audit(who,"admin.password.rotate","ktv-admin",new JSONObject());return object("ok",true);
         });
     }
     public JSONObject roomCode(JSONObject who,String id,boolean rotate) {
@@ -547,7 +575,7 @@ public class KtvService {
             String accountId=id==null?"A"+String.format("%02d",state.getJSONArray("accounts").size()+1):id;
             JSONObject a=object("id",accountId,"name",name,"enabled",body.getBooleanValue("enabled"),"process",body.getBooleanValue("process"),"deliver",body.getBooleanValue("deliver"),"version",existing==null?1:existing.getIntValue("version")+1,"passwordHash",password!=null&&!password.isEmpty()?passwords.encode(password):existing.getString("passwordHash"));
             if(existing==null) state.getJSONArray("accounts").add(a); else {existing.clear();existing.putAll(a);}
-            if(password!=null && !password.isEmpty()) jdbc.update("DELETE FROM ktv_session WHERE role='supplier' AND subject=?",accountId);
+            if(!a.getBooleanValue("enabled") || (password!=null && !password.isEmpty())) jdbc.update("DELETE FROM ktv_session WHERE role='supplier' AND subject=?",accountId);
             audit(who,"account.save",accountId,object("enabled",a.get("enabled"),"process",a.get("process"),"deliver",a.get("deliver"),"passwordChanged",password!=null&&!password.isEmpty()));
             return object("id",accountId);
         });
