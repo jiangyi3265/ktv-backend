@@ -69,6 +69,24 @@ public class KtvService {
         return settings==null?object("enabled",false,"version",1):copy(settings);
     }
     private boolean orderingEnabled(JSONObject state) {return ordering(state).getBooleanValue("enabled");}
+    private JSONObject staffPortal(JSONObject state) {
+        JSONObject value=state.getJSONObject("staffPortal");
+        return value==null?object("enabled",true,"version",1):copy(value);
+    }
+    public JSONObject publicSiteSettings() {return object("staffPortalEnabled",staffPortal(read()).getBooleanValue("enabled"));}
+    public void requireStaffPortal() {require(staffPortal(read()).getBooleanValue("enabled"),403,"小程序工作人员入口已关闭，请使用电脑后台处理订单");}
+    public JSONObject staffPortalSettings(JSONObject who,JSONObject body) {
+        role(who,"admin");
+        require(body!=null && body.get("enabled") instanceof Boolean,400,"请选择是否开放工作人员入口");
+        return change(state -> {
+            JSONObject previous=staffPortal(state);
+            require(body.get("version") instanceof Number && body.getDoubleValue("version")==body.getLongValue("version") && body.getLongValue("version")==previous.getLongValue("version"),409,"入口状态已被其他管理员修改，请刷新后重试");
+            JSONObject next=object("enabled",body.getBooleanValue("enabled"),"version",previous.getLongValue("version")+1,"updatedAt",LocalDateTime.now().toString());
+            state.put("staffPortal",next);
+            audit(who,"store.staffPortal","store",object("before",previous,"after",next));
+            return copy(next);
+        });
+    }
     private void requireOrdering(JSONObject state) {require(orderingEnabled(state),409,"点餐服务已暂停，暂时不能下单或支付");}
     public JSONObject orderingSettings(JSONObject who,JSONObject body) {
         role(who,"admin");
@@ -174,6 +192,7 @@ public class KtvService {
         jdbc.update("INSERT INTO ktv_identity(recovery_hash,subject,created_at) VALUES(?,?,NOW())",hash(recovery),who.getString("subject"));return object("recovery",recovery);
     }
     public JSONObject staffSession(JSONObject body,String remote) {
+        requireStaffPortal();
         String username=text(body,"username",64),password=body.getString("password");
         require(password!=null && password.getBytes(StandardCharsets.UTF_8).length<=72,400,"密码不能超过 72 个 UTF-8 字节");
         limit("login:"+remote+":"+username,10,600);
@@ -280,7 +299,7 @@ public class KtvService {
         }
         JSONObject detail=null;
         if(selectedId!=null && !selectedId.isEmpty()) {try{detail=order(who,selectedId);}catch(ResponseStatusException e){if(e.getRawStatusCode()!=404)throw e;}}
-        return object("revision",state.get("revision"),"role",role,"subject",who.get("subject"),"products",products,"rooms",rooms,"accounts",accounts,"orders",orders,"orderDetail",detail,"orderCounts",counts,"orderAlerts",alerts,"page",page,"hasMore",hasMore,"demoPayment",demoPayment,"orderingEnabled",orderingEnabled(state),"ordering",role.equals("admin")?ordering(state):null);
+        return object("revision",state.get("revision"),"role",role,"subject",who.get("subject"),"products",products,"rooms",rooms,"accounts",accounts,"orders",orders,"orderDetail",detail,"orderCounts",counts,"orderAlerts",alerts,"page",page,"hasMore",hasMore,"demoPayment",demoPayment,"orderingEnabled",orderingEnabled(state),"ordering",role.equals("admin")?ordering(state):null,"staffPortal",role.equals("admin")?staffPortal(state):null);
     }
     private void formatOrderTime(JSONObject order) {
         String created=order.getString("createdAt");

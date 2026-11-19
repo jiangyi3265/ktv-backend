@@ -71,6 +71,26 @@ class KtvOrderingTest {
         assertEquals(409,assertThrows(ResponseStatusException.class,()->service.orderingSettings(admin,object("enabled",false,"version",original.getLongValue("version")))).getRawStatusCode());
         assertTrue(setting().getBooleanValue("enabled"));
     }
+    @Test void staffPortalIsIndependentPersistentAndKeepsPcAndCustomerAccess() {
+        assertTrue(service.publicSiteSettings().getBooleanValue("staffPortalEnabled"));
+        String staffToken=service.staffSession(object("username","A01","password","Test-supplier-2026!"),"portal-test").getString("token");
+        JSONObject settings=service.staffPortalSettings(admin,object("enabled",false,"version",1));
+        assertFalse(service.publicSiteSettings().getBooleanValue("staffPortalEnabled"));
+        assertFalse(setting().getBooleanValue("enabled"));
+        assertEquals(403,assertThrows(ResponseStatusException.class,()->service.staffSession(object("username","A01","password","Test-supplier-2026!"),"portal-test")).getRawStatusCode());
+        KtvAccess access=new KtvAccess(service);
+        org.springframework.mock.web.MockHttpServletRequest request=new org.springframework.mock.web.MockHttpServletRequest();
+        request.addHeader("X-KTV-Token",staffToken);
+        assertEquals(403,assertThrows(ResponseStatusException.class,()->access.who(request)).getRawStatusCode());
+        assertEquals("customer",service.snapshot(customer).getString("role"));
+        assertNotNull(service.snapshot(admin).getJSONObject("staffPortal"));
+        service.initialize();assertFalse(service.publicSiteSettings().getBooleanValue("staffPortalEnabled"));
+        assertEquals(409,assertThrows(ResponseStatusException.class,()->service.staffPortalSettings(admin,object("enabled",true,"version",1))).getRawStatusCode());
+        assertEquals(403,assertThrows(ResponseStatusException.class,()->service.staffPortalSettings(supplier,object("enabled",true,"version",2))).getRawStatusCode());
+        service.staffPortalSettings(admin,object("enabled",true,"version",settings.getLongValue("version")));
+        assertEquals("supplier",access.who(request).getString("role"));
+        assertTrue(service.audits(admin,1).toString().contains("store.staffPortal"));
+    }
     @Test void httpRouteChecksAuthenticationAndReturnsSavedState() throws Exception {
         KtvAccess access=new KtvAccess(service);KtvWechat wechat=mock(KtvWechat.class);
         org.springframework.test.web.servlet.MockMvc mvc=MockMvcBuilders.standaloneSetup(new KtvOperationsController(service,wechat,access)).setControllerAdvice(new KtvErrors()).build();

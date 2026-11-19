@@ -22,8 +22,13 @@ public class KtvPcAdminSessions {
         this.login=login;this.tokens=tokens;this.accounts=accounts;this.service=service;
     }
     boolean allowed(long id) {return accounts.allowed(id);}
+    @ExceptionHandler(org.springframework.web.server.ResponseStatusException.class)
+    public org.springframework.http.ResponseEntity<JSONObject> rejected(org.springframework.web.server.ResponseStatusException error) {
+        return org.springframework.http.ResponseEntity.status(error.getRawStatusCode()).body(object("message",error.getReason()));
+    }
     @PostMapping("/pc-admin") public Object login(@RequestBody JSONObject body,HttpServletRequest request,HttpServletResponse response) {
         response.setHeader("Cache-Control","no-store");
+        service.requireStaffPortal();
         String username=text(body,"username",64),password=body.getString("password");
         require(password!=null && password.length()<=72,400,"请输入管理员密码");
         String jwt=login.login(username,password,body.getString("code"),body.getString("uuid"));

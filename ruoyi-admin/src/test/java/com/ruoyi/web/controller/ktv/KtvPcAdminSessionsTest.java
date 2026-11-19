@@ -20,6 +20,16 @@ class KtvPcAdminSessionsTest {
     final KtvService service=mock(KtvService.class);
     final KtvPcAccountPolicy accounts=new KtvPcAccountPolicy(users,permissions);
     final KtvPcAdminSessions api=new KtvPcAdminSessions(login,tokens,accounts,service);
+    @Test void closedPortalReturnsForbiddenWithoutAttemptingPasswordLogin() throws Exception {
+        doThrow(new ResponseStatusException(org.springframework.http.HttpStatus.FORBIDDEN,"小程序工作人员入口已关闭，请使用电脑后台处理订单")).when(service).requireStaffPortal();
+        org.springframework.test.web.servlet.MockMvc mvc=org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(api)
+            .setControllerAdvice(new com.ruoyi.framework.web.exception.GlobalExceptionHandler()).build();
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/ktv-api/sessions/pc-admin")
+            .contentType(org.springframework.http.MediaType.APPLICATION_JSON).content("{\"username\":\"fixture-admin\",\"password\":\"fixture-password\"}"))
+            .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isForbidden())
+            .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.message").value("小程序工作人员入口已关闭，请使用电脑后台处理订单"));
+        verifyNoInteractions(login,tokens);
+    }
     LoginUser fixture(long id) {
         SysUser user=new SysUser();user.setUserId(id);user.setStatus("0");user.setDelFlag("0");user.setPassword("fixture-hash");
         LoginUser session=new LoginUser();session.setUserId(id);session.setUser(user);session.setToken("fixture-session-key");

@@ -18,7 +18,11 @@ public class KtvAccess {
         if(auth!=null && auth.getPrincipal() instanceof LoginUser) tokens.delLoginUser(((LoginUser)auth.getPrincipal()).getToken());
     }
     public JSONObject who(HttpServletRequest request) {
-        if(request.getHeader("X-KTV-Token")!=null) return service.identity(request.getHeader("X-KTV-Token"));
+        if(request.getHeader("X-KTV-Token")!=null) {
+            JSONObject who=service.identity(request.getHeader("X-KTV-Token"));
+            if(!"customer".equals(who.getString("role"))) service.requireStaffPortal();
+            return who;
+        }
         Authentication auth=SecurityUtils.getAuthentication();
         if(auth!=null && auth.getPrincipal() instanceof LoginUser) {
             LoginUser user=(LoginUser)auth.getPrincipal();

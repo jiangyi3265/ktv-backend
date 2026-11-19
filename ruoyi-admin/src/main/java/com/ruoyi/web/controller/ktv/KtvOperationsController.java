@@ -26,6 +26,8 @@ public class KtvOperationsController {
     @PostMapping("/sessions/recovery") public Object recovery(HttpServletRequest request) {JSONObject who=access.who(request);service.limit("recovery:"+who.getString("subject"),5,600);return service.customerRecovery(who);}
     @GetMapping("/readiness") public Object readiness(HttpServletRequest request) {JSONObject who=access.who(request);require("admin".equals(who.getString("role")),403,"仅管理员可查看配置状态");return wechat.readiness();}
     @PutMapping("/admin/ordering") public Object ordering(@RequestBody JSONObject body,HttpServletRequest request) {return service.orderingSettings(access.who(request),body);}
+    @GetMapping("/site-settings") public Object siteSettings() {return service.publicSiteSettings();}
+    @PutMapping("/admin/staff-portal") public Object staffPortal(@RequestBody JSONObject body,HttpServletRequest request) {return service.staffPortalSettings(access.who(request),body);}
     @GetMapping("/orders/{id}") public Object order(@PathVariable String id,HttpServletRequest request) {return service.order(access.who(request),id);}
     @PostMapping("/orders/{id}/cancel") public Object cancel(@PathVariable String id,HttpServletRequest request) {JSONObject who=access.who(request);JSONObject order=service.order(who,id);require(!"supplier".equals(who.getString("role")),403,"食堂无权取消订单");require(Arrays.asList("unpaid","cancelled").contains(order.getString("status")),409,"订单已支付，请联系管理员处理退款");wechat.close(service.paymentTrade(id));return service.cancel(who,id);}
     @PostMapping("/orders/{id}/stock-issue") public Object stockIssue(@PathVariable String id,@RequestBody JSONObject body,HttpServletRequest request) {return service.reportStockIssue(access.who(request),id,body);}
