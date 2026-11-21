@@ -22,6 +22,71 @@ class KtvFinanceTest {
     String order(){return service.createOrder(customer,object("room","A08","scene",service.roomCode(admin,"A08",false).getString("scene"),"requestKey",UUID.randomUUID().toString(),"items",JSONArray.of(object("id","chicken","quantity",1)))).getString("id");}
     String pay(String id){String trade=service.paymentIntent(customer,id).getString("tradeNo");service.confirmPayment(trade,"transaction-"+id,3200,"2026-11-09T20:30:00Z","finance-test");return trade;}
     JSONObject ledger(JSONObject who){return finance.ledger(who,"","","","",1);}
+    private void setCost(String value) {
+        JSONObject product=find(service.snapshot(admin).getJSONArray("products"),"chicken");
+        product.put("settlementPrice",value);
+        service.product(admin,"chicken",product);
+    }
+    private void deliver(String id,JSONObject kitchen) {
+        for (String next : Arrays.asList("preparing","delivering","completed"))
+            service.advance(kitchen,id,object("status",next,"checkedIds",JSONArray.of("chicken")),false);
+    }
+    private void refund(String id) {
+        long cents=service.order(admin,id).getLongValue("totalCents");
+        JSONObject intent=service.refundIntent(admin,id,object("version",service.order(admin,id).getIntValue("version"),"reason","测试退款"));
+        service.confirmRefund(intent.getString("refundNo"),"SUCCESS",cents,cents);
+    }
+    @Test void monthUsesSnapshotAtOrderTimeAndActualKitchenAndCountsRefundsOnlyAfterDelivery() {
+        String legacy=order(); pay(legacy); deliver(legacy,supplier);
+        setCost("10");
+        String id=service.createOrder(customer,object("room","A08","scene",service.roomCode(admin,"A08",false).getString("scene"),
+                "requestKey","two-wings","items",JSONArray.of(object("id","chicken","quantity",2)))).getString("id");
+        JSONObject customerView=service.snapshot(customer,1,id);
+        assertFalse(customerView.toJSONString().contains("settlementPrice"));
+        assertFalse(service.order(customer,id).toJSONString().contains("settlementPrice"));
+        service.confirmPayment(service.paymentIntent(customer,id).getString("tradeNo"),"trade-"+id,6400,"2026-11-09T20:30:00Z","finance-test");
+        setCost("12.35");
+        service.account(admin,null,object("name","第二食堂","password",UUID.randomUUID().toString(),"enabled",true,"process",true,"deliver",true));
+        JSONObject other=object("role","supplier","subject","A03");
+        service.reassign(admin,id,object("supplierId","A03","version",service.order(admin,id).getIntValue("version"),"reason","转派"));
+        deliver(id,other); refund(id);
+        String second=order(); pay(second); deliver(second,supplier);
+        String pending=order(); pay(pending); refund(pending);
+        String demo=order(); service.advance(customer,demo,new JSONObject(),true); deliver(demo,supplier);
+        service.initialize(); service.initialize();
+        JSONObject first=finance.settlement(supplier,"").getJSONArray("kitchens").getJSONObject(0);
+        assertEquals(2,first.getLongValue("quantity")); assertEquals(1,first.getLongValue("unpricedQuantity"));
+        assertEquals(1235,first.getLongValue("amountCents")); assertEquals(0,first.getLongValue("refundQuantity"));
+        JSONArray onlyOther=finance.settlement(other,"").getJSONArray("kitchens");
+        assertEquals(1,onlyOther.size()); JSONObject k=onlyOther.getJSONObject(0);
+        assertEquals(2,k.getLongValue("quantity")); assertEquals(2,k.getLongValue("refundQuantity"));
+        assertEquals(2000,k.getLongValue("amountCents"));
+        assertEquals(2,finance.settlement(admin,"").getJSONArray("kitchens").size());
+        assertThrows(ResponseStatusException.class,()->finance.settlement(customer,""));
+        assertThrows(ResponseStatusException.class,()->finance.settlement(admin,"2026-13"));
+        assertThrows(ResponseStatusException.class,()->setCost("-1"));
+        assertThrows(ResponseStatusException.class,()->setCost("10.001"));
+    }
+    @Test void ratesAndCrossMonthRefundsStaySeparate() {
+        String at = java.time.ZonedDateTime.of(2025,6,30,23,59,0,0,java.time.ZoneId.of("Asia/Shanghai"))
+                .withZoneSameInstant(java.time.ZoneId.systemDefault()).toLocalDateTime().toString();
+        String next = java.time.LocalDateTime.parse(at).plusMinutes(2).toString();
+        for(int i=0;i<2;i++) {
+            JSONObject sale=object("id",2000+i,"supplierId","A01","status","refunded","paid",true,"paymentMode","wechat",
+                    "items",JSONArray.of(object("id","wings","name","鸡翅","settlementPrice",i==0?10:12,"quantity",3)),
+                    "events",JSONArray.of(object("label","配送方确认送达","at",at)),"refundedAt",next);
+            KtvSettlement.record(jdbc,sale);
+        }
+        JSONObject june=finance.settlement(supplier,"2025-06").getJSONArray("kitchens").getJSONObject(0);
+        assertEquals(2,june.getJSONArray("items").size()); assertEquals(6600,june.getIntValue("amountCents"));
+        assertEquals(6,june.getIntValue("quantity")); assertEquals(0,june.getIntValue("refundQuantity"));
+        JSONObject july=finance.settlement(supplier,"2025-07").getJSONArray("kitchens").getJSONObject(0);
+        assertEquals(0,july.getIntValue("amountCents")); assertEquals(6,july.getIntValue("refundQuantity"));
+        setCost("0");
+        JSONObject legacyClient=find(service.snapshot(admin).getJSONArray("products"),"chicken");
+        legacyClient.remove("settlementPrice"); service.product(admin,"chicken",legacyClient);
+        assertEquals(0,find(service.snapshot(admin).getJSONArray("products"),"chicken").getInteger("settlementPrice").intValue());
+    }
     @Test void onlySuccessfulRealPaymentsAndRefundsEnterLedgerOnce(){
         String unpaid=order(),demo=order();service.advance(customer,demo,new JSONObject(),true);assertEquals(0,ledger(admin).getLongValue("total"));
         String trade=pay(unpaid);service.confirmPayment(trade,"transaction-"+unpaid,3200,"2026-11-09T20:30:00Z","finance-test");

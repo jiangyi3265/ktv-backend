@@ -265,7 +265,13 @@ public class KtvService {
         JSONArray orders=new JSONArray(),products=new JSONArray(),rooms=new JSONArray(),accounts=new JSONArray();
         if(role.equals("supplier")) { JSONObject account=copy(supplier(state,who)); account.remove("passwordHash"); accounts.add(account); }
         else {
-            for(Object raw:state.getJSONArray("products")) { JSONObject p=(JSONObject)raw; if(role.equals("admin") || (orderingEnabled(state) && p.getBooleanValue("onSale"))) products.add(p); }
+            for(Object raw:state.getJSONArray("products")) {
+                JSONObject p=(JSONObject)raw;
+                if(role.equals("admin")) products.add(p);
+                else if(orderingEnabled(state) && p.getBooleanValue("onSale")) {
+                    JSONObject visible=copy(p); visible.remove("settlementPrice"); products.add(visible);
+                }
+            }
             for(Object raw:state.getJSONArray("rooms")) { JSONObject item=(JSONObject)raw; if(role.equals("admin") || item.getBooleanValue("bound")) rooms.add(item); }
         }
         if(role.equals("admin")) for(Object raw:state.getJSONArray("accounts")) { JSONObject a=copy((JSONObject)raw); a.remove("passwordHash"); accounts.add(a); }
@@ -290,7 +296,7 @@ public class KtvService {
             JSONObject order=(JSONObject)raw;
             formatOrderTime(order);
             if(role.equals("admin") || (role.equals("customer") && who.getString("subject").equals(order.getString("customerId")))) {
-                JSONObject safe=copy(order); safe.remove("requestKey"); safe.remove("requestHash"); orders.add(safe);
+                sanitizeOrder(order,role); orders.add(order);
             } else if(role.equals("supplier") && order.getBooleanValue("paid") && who.getString("subject").equals(order.getString("supplierId"))) {
                 JSONArray items=new JSONArray();
                 for(Object itemRaw:order.getJSONArray("items")) { JSONObject item=(JSONObject)itemRaw; items.add(object("id",item.get("id"),"name",item.get("name"),"quantity",item.get("quantity"),"image",item.get("image"),"customImage",item.get("customImage"))); }
@@ -383,6 +389,7 @@ public class KtvService {
             String label=next.equals("pending")?"模拟支付成功":next.equals("preparing")?"食堂接单":next.equals("delivering")?"开始配送":"配送方确认送达";
             event(order,label); if(payment) { order.put("paymentMode","demo");order.put("paidAt",LocalDateTime.now().toString()); }
             audit(who,"order.transition",id,object("from",current,"to",next));
+            if ("completed".equals(next)) KtvSettlement.record(jdbc,order);
             return object("id",id);
         });
     }
@@ -396,12 +403,16 @@ public class KtvService {
         role(who,"admin"); require(page>=1 && page<=100000,400,"页码无效");
         return jdbc.queryForList("SELECT id,actor,action,target,detail,created_at FROM ktv_audit ORDER BY id DESC LIMIT 50 OFFSET ?",(page-1)*50);
     }
+    private void sanitizeOrder(JSONObject order,String role) {
+        order.remove("requestKey"); order.remove("requestHash");
+        if ("customer".equals(role)) for (Object raw : order.getJSONArray("items")) ((JSONObject)raw).remove("settlementPrice");
+    }
     public JSONObject order(JSONObject who,String id) {
         require(id!=null && id.matches("[0-9]{1,18}"),404,"订单不存在");
         List<String> rows=jdbc.queryForList("SELECT payload FROM ktv_order WHERE id=?",String.class,id);require(!rows.isEmpty(),404,"订单不存在");
         JSONObject found=JSON.parseObject(rows.get(0));String role=who.getString("role");
         require("admin".equals(role) || ("customer".equals(role) && who.getString("subject").equals(found.getString("customerId"))) || ("supplier".equals(role) && found.getBooleanValue("paid") && who.getString("subject").equals(found.getString("supplierId"))),404,"订单不存在");
-        found.remove("requestKey");found.remove("requestHash");formatOrderTime(found);
+        sanitizeOrder(found,role);formatOrderTime(found);
         if("supplier".equals(role)) {
             supplier(read(),who);JSONArray items=new JSONArray();for(Object raw:found.getJSONArray("items")) {JSONObject item=(JSONObject)raw;items.add(object("id",item.get("id"),"name",item.get("name"),"quantity",item.get("quantity"),"image",item.get("image"),"customImage",item.get("customImage")));}
             return object("id",found.get("id"),"room",found.get("room"),"status",found.get("status"),"time",found.get("time"),"items",items,"events",found.get("events"),"version",found.get("version"),"stockIssue",found.get("stockIssue"),"dispatchAt",found.get("dispatchAt"));
@@ -559,7 +570,12 @@ public class KtvService {
             if("refunded".equals(o.getString("status"))) return null;
             jdbc.update("UPDATE ktv_payment SET refund_status=? WHERE refund_no=?",providerStatus,refund);
             o.put("refundStatus",providerStatus);
-            if("SUCCESS".equals(providerStatus)) {o.put("status","refunded");o.put("refundedAt",LocalDateTime.now().toString());o.put("version",o.getIntValue("version")+1);KtvFinanceService.record(jdbc,o,"refund",refund,o.getString("refundedAt"));event(o,"微信全额退款成功");audit(object("role","system","subject","wechat"),"refund.success",o.getString("id"),object("refundNo",refund));}
+            if("SUCCESS".equals(providerStatus)) {
+                o.put("status","refunded");o.put("refundedAt",LocalDateTime.now().toString());o.put("version",o.getIntValue("version")+1);
+                KtvFinanceService.record(jdbc,o,"refund",refund,o.getString("refundedAt"));
+                KtvSettlement.record(jdbc,o);
+                event(o,"微信全额退款成功");audit(object("role","system","subject","wechat"),"refund.success",o.getString("id"),object("refundNo",refund));
+            }
             return null;
         });
     }
@@ -581,6 +597,7 @@ public class KtvService {
             require(custom==null || custom.isEmpty() || custom.matches("/ktv-api/assets/[a-f0-9-]+\\.(png|jpg)"),400,"请先上传餐品图片");
             if(custom!=null && !custom.isEmpty()) require(java.nio.file.Files.isRegularFile(java.nio.file.Paths.get(uploadPath).toAbsolutePath().normalize().resolve(custom.substring(custom.lastIndexOf('/')+1))),400,"餐品图片不存在，请重新上传");
             JSONObject p=object("id",id,"name",name,"category",category,"price",price,"image",body.getString("image"),"customImage",custom,"description",body.getString("description"),"onSale",body.getBooleanValue("onSale"),"version",existing==null?1:existing.getIntValue("version")+1);
+            KtvSettlement.applyPrice(p,existing,body);
             if(existing==null) state.getJSONArray("products").add(p); else { existing.clear();existing.putAll(p); }
             audit(who,"product.save",id,object("before",before,"after",p));
             return object("id",id);

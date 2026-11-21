@@ -19,6 +19,7 @@ public class KtvFinanceService {
     public KtvFinanceService(JdbcTemplate jdbc) { this.jdbc = jdbc; }
 
     static void createTable(JdbcTemplate jdbc) {
+        KtvSettlement.createTable(jdbc);
         jdbc.execute("CREATE TABLE IF NOT EXISTS ktv_finance_entry (id BIGINT AUTO_INCREMENT PRIMARY KEY,event_key VARCHAR(100) NOT NULL UNIQUE,kind VARCHAR(16) NOT NULL,order_id VARCHAR(80) NOT NULL,room VARCHAR(12) NOT NULL,supplier_id VARCHAR(40) NOT NULL,amount_cents BIGINT NOT NULL,provider_no VARCHAR(64) NOT NULL,occurred_at DATETIME NOT NULL,time_source VARCHAR(16) NOT NULL,recorded_at DATETIME NOT NULL,INDEX(occurred_at,id),INDEX(order_id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
     }
 
@@ -51,6 +52,7 @@ public class KtvFinanceService {
                 cursor = ((Number)row.get("id")).longValue();
                 JSONObject order = JSON.parseObject((String)row.get("payload"));
                 if (!"wechat".equals(order.getString("paymentMode"))) continue;
+                KtvSettlement.record(jdbc,order);
                 record(jdbc, order, "receipt", (String)row.get("transaction_id"), order.getString("paidAt"));
                 if ("SUCCESS".equals(row.get("refund_status")) && "refunded".equals(order.getString("status")))
                     record(jdbc, order, "refund", (String)row.get("refund_no"), order.getString("refundedAt"));
@@ -66,6 +68,10 @@ public class KtvFinanceService {
             JSONObject account=find(state.getJSONArray("accounts"),who.getString("subject"));
             require(account!=null && account.getBooleanValue("enabled"),403,"食堂账号已停用，请联系管理员");
         }
+    }
+    public JSONObject settlement(JSONObject who, String month) {
+        allowed(who);
+        return KtvSettlement.month(jdbc,who,month);
     }
     private void scope(Filter f, JSONObject who) {
         if ("supplier".equals(who.getString("role"))) {
